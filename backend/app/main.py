@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -41,11 +42,31 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="TV電話MVP API", version="0.2.0", lifespan=lifespan)
 
-# Phase 3: frontend（Next.js dev server）からのローカル疎通用に CORS を許可する。
-# 対象は localhost:3000 のみ（本番は Azure Static Web Apps 等のオリジンに差し替え予定）。
+
+def _cors_origins() -> list[str]:
+    """許可オリジンを決める。
+
+    既定は localhost:3000（ローカル開発）。本番（Azure）は Static Web Apps の
+    オリジンを環境変数 ``CORS_ALLOW_ORIGINS``（カンマ区切り）で追加する。
+    例: ``CORS_ALLOW_ORIGINS=https://xxx.azurestaticapps.net`` または
+    ``http://localhost:3000,https://xxx.azurestaticapps.net``。
+    空・未設定なら localhost:3000 のみを既定として残す。
+    """
+    raw = os.environ.get("CORS_ALLOW_ORIGINS", "").strip()
+    if not raw:
+        return ["http://localhost:3000"]
+    origins = [o.strip() for o in raw.split(",") if o.strip()]
+    # 明示指定でも localhost:3000 は既定として維持する（ローカル開発を壊さない）。
+    if "http://localhost:3000" not in origins:
+        origins.append("http://localhost:3000")
+    return origins
+
+
+# frontend からの CORS を許可する。ローカルは localhost:3000、本番は SWA URL を
+# 環境変数 CORS_ALLOW_ORIGINS（カンマ区切り）で追加する（A1 でコンテナに設定）。
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -30,6 +30,15 @@ BGM 付きハイライト動画を生成、家族の閲覧 UI と高齢者側の
 - Blob は非公開＋SAS のみ。DB（PostgreSQL）は台帳でありメディア実体は持たない
 - Push 通知・常時フォトフレーム・不在着信・専用 Android 端末は **Release2**（MVP対象外）
 
+## 確定済み設計からの乖離（暫定運用）
+
+- **タイトル/キャプション生成の直 OpenAI API 利用（2026-07-04〜）**:
+  MVP 期間中の暫定として、タイトル生成は支給 OpenAI キー（直 API・`OpenAILabelProvider`）を
+  優先利用する。顔画像が Azure 境界外（OpenAI）に出るため、**本番前に Azure OpenAI Regional
+  （構築済み `oai-tvmvp-73bb`）へ戻す**（worker の環境変数を `LABEL_PROVIDER=azure` に
+  切り替えるだけ。選択ロジックは `worker/stages/labels.py` の `get_label_provider` 参照）。
+  被験者がチーム内役者のため許容（発注側承認 2026-07-04）。
+
 ## 委託と内製
 
 - 委託コア①（通話基盤）: `frontend/src/modules/call/`＋backend トークン・着信・リンク系
@@ -65,6 +74,59 @@ BGM 付きハイライト動画を生成、家族の閲覧 UI と高齢者側の
 - 検知パラメータは `docs/detection-params.md` の初期値を使う（精度チューニングは検収対象外）
 - 開発期間は実働2週間。遅延時の削減優先順位は RFP 10章（①映像look-back → ②STTトリガー →
   ③visionキャプション → ④BGM → ⑤着信ポーリング → ⑥高齢者側再生 → ⑦動画生成 の順で削る）
+
+## 現在の状態（2026-07-05）
+
+- **STT 完了（2026-07-05・削減ラダー②解除＝Azure Speech による感情ワード検知）**:
+  - Azure Speech リソース `speech-tvmvp-73bb`（**F0**・japaneast・タグ `app=tvmvp owner=mitsuru`）を作成。
+    キー/region は `backend/cloud.env`（`.gitignore` 済み）に記録（コミット・ログ出力禁止）。
+  - backend: `RealSpeechTokenProvider`（STS `issueToken` へ `Ocp-Apim-Subscription-Key` で POST →
+    約10分の短命トークン）を追加。`AZURE_SPEECH_KEY` / `AZURE_SPEECH_REGION` が両方非空なら Real、
+    欠けたら Fake に DI 自動切替（Agora と同じパターン・`deps.get_speech_provider`）。
+  - frontend: `AzureSttProvider`（`microsoft-cognitiveservices-speech-sdk`）。高齢者側リモート音声を
+    WebAudio で **PCM16・16kHz** にダウンサンプリングして `PushAudioInputStream` へ供給 → `ja-JP` 連続認識。
+    **感情ワード辞書**（`sttConfig.ts` の `EMOTION_WORDS`・フレーズリスト登録）でヒット検出。
+    トークンは `/tokens/speech` から取得し **約9分ごとに更新**。`latest()` は直近約10秒の
+    `stt_text` と `stt_labels` を返す。**best-effort**（SDK/トークン失敗は警告のみで STT 無効のまま継続）。
+  - 配線（`index.ts`）: 感情ワードヒットで `handleTrigger` を `reason="stt"` で発火。**STT起因の発火には
+    RMS と共有のクールダウン（4秒）** を適用（`passesSharedCooldown`）。metadata に `stt_text`/`stt_labels`
+    を付与（STT 有効時のみ）。`window.__detection.state.stt`（enabled/lastText/labelHits/triggerCount）を追加。
+    **→ `trigger_reason` に `stt` が入り得る**（従来は常に `rms`）。
+  - 検証: vitest 18件（rmsTrigger6＋STT12: 感情ワードマッチング・共有クールダウン・PCM変換）／
+    pytest 87件（Speech プロバイダ切替＋Real の HTTP モック8件を追加）／Playwright 2件
+    （STT無効=Fake トークン経路で緑を維持）。ローカルで Speech キーを注入した uvicorn の
+    `/tokens/speech` が Real トークン（Fake でない JWT）を返すことを確認。
+  - クラウド反映: `ca-tvmvp-api` に secret `speech-key`＋`AZURE_SPEECH_KEY`/`AZURE_SPEECH_REGION` を設定し
+    api イメージ再ビルド→更新。frontend 再ビルド→SWA 再デプロイ。**クラウド `/tokens/speech` が Real
+    トークンを返すことを確認済み**。
+  - 実発話での感情ワード発火（「かわいいね」等）はユーザーの受入で確認する（Fake 音声では STT 認識は起きない）。
+
+## 現在の状態（2026-07-04）
+
+- **A1 完了（2026-07-04・Azure 実環境の構築とデプロイ）**:
+  - RG `rg-001-gen12`（東日本）にコスト最小構成で構築。命名サフィックス `73bb`。
+    全リソースに `app=tvmvp owner=mitsuru` タグ。リソース一覧・URL・月額は `infra/README.md`。
+    秘密・接続情報は `backend/cloud.env`（`.gitignore` 済み・OpenAIキーは worker シークレット）。
+  - PostgreSQL(B1ms/PG16)＋Storage(LRS・media/pipeline-jobs)＋ACR(Basic)＋
+    Container Apps 環境 `cae-tvmvp`。`ca-tvmvp-api`（外部Ingress:8000・min1）と
+    `ca-tvmvp-worker`（Ingressなし・**KEDA azure-queue で min0/max1**・1CPU/2GiB）。
+    SWA(Free)に frontend 静的エクスポートを SWA CLI で配信。
+  - **Azure OpenAI 成功**: `oai-tvmvp-73bb`（S0）に `gpt-4o`(2024-11-20) を
+    **Regional Standard**（TPM10K）でデプロイ。`gpt-4o-mini` は japaneast で GlobalStandard のみ
+    のため、PII 要件「Regional Standard 必須」を満たす `gpt-4o` を採用。
+    `worker/stages/labels.py` の AzureOpenAILabelProvider を本実装（vision でタイトル/キャプション
+    生成・失敗時は定型フォールバック）。クラウド検証で vision 生成タイトルを確認済み。
+  - コード変更: backend `Dockerfile`／worker `Dockerfile`(apt で ffmpeg・BGM同梱)／
+    `.dockerignore` 追加／`main.py` の CORS を `CORS_ALLOW_ORIGINS`（カンマ区切り）で環境変数化
+    （localhost:3000 は既定維持）／`next.config.mjs` に `output:'export'`／
+    `worker/main.py` に Azure SDK ログ抑制／labels 本実装＋stage2 が photo_paths を渡すよう微修正。
+  - クラウドE2E（通話以外）を一巡: /healthz→登録リンク→devices/register→calls→
+    upload-sas 実PUT→media/register→**worker がスケール0→1で起床**して score→候補提示
+    （無表情ゲート確認）→selection→**worker が render**（1080p xfade・**BGM入り**）→
+    album ready→video_sas_url を実DL→ffprobe で 30s/h264/**aac** 確認。SWA トップ 200＋API 疎通も確認。
+    worker はキューが空になれば ScaledToZero に戻る。
+  - 既知の注意: worker は 1080p 合成でメモリを食うため 2GiB 必須（1GiB は ffmpeg OOM=SIGKILL）。
+    Agora シークレットは A1 未設定（ユーザーが `.env` の値で設定。手順は dev-setup §13-4）。
 
 ## 現在の状態（2026-07-03）
 
@@ -102,8 +164,8 @@ BGM 付きハイライト動画を生成、家族の閲覧 UI と高齢者側の
   （tests/e2e-scenario.md）を検収手順書として全面記入（RFP12章対応表・判定可否付き）。
   dev-setup.md §11 に通し手順を追記
 - **アカウント不要範囲はすべて完了**。残タスク:
-  - A1（Azure実環境）・A12（BGM実音源）・Azure Speech STT（削減ラダー②で除外中）・
-    Azure OpenAI vision（タイトル/キャプション）
+  - A1（Azure実環境）・A12（BGM実音源）・~~Azure Speech STT（削減ラダー②で除外中）~~
+    → **2026-07-05 に②解除・実装済み**・Azure OpenAI vision（タイトル/キャプション）
 - **M2 完了（2026-07-04・検知コア②＝感情検知・自動キャプチャ＋通話後同期）**:
   - frontend `modules/detection/`: `rmsTrigger.ts`（RMS発火判定の純粋ロジック=緩いEMA
     baseline(τ=4s)からの相対上昇＋VADゲート＋持続200ms＋クールダウン4s。支給初期値。
@@ -113,7 +175,8 @@ BGM 付きハイライト動画を生成、家族の閲覧 UI と高齢者側の
     （`@mediapipe/tasks-vision` FaceLandmarker で face_score。ロード失敗時は 0 で継続）／
     `videoRing.ts`（映像look-back 直近3コマ）／`burst.ts`（連写10枚＋look-back前置）／
     `storage.ts`（IndexedDB=`idb`。call_id別 photos/audio）／`sttProvider.ts`
-    （インターフェース＋noopのみ＝**削減ラダー②適用**）／`index.ts`（`attachDetection`＋
+    （インターフェース＋noop。当初は**削減ラダー②適用**、**2026-07-05 に②解除**＝
+    `azureSttProvider.ts`/`sttConfig.ts` を追加）／`index.ts`（`attachDetection`＋
     テスト用 `window.__detection.{forceTrigger(),state}`）。metadata は data-contract 付録キー
     （rms_db/rms_rise/face_score/trigger_reason/lookback）＋captured_at
   - frontend `modules/sync/`: `syncCallMedia(callId)`（IndexedDB→upload-sas→Blob PUT→

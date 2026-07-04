@@ -112,7 +112,9 @@ def run(db: Session, album_id: str, blob, *, bgm_dir: Path | None = None) -> boo
 
         # 2) タイトル・キャプション（既にユーザー指定があれば上書きしない）。
         call_date = call.started_at or call.created_at or datetime.now(timezone.utc)
-        labels = get_label_provider().generate(call_date, len(photo_paths))
+        labels = get_label_provider().generate(
+            call_date, len(photo_paths), photo_paths=photo_paths
+        )
         if not album.title:
             album.title = labels.title
         if not album.caption:

@@ -1,0 +1,36 @@
+# az acr build のアップロード対象から除外するもの（ビルドコンテキスト軽量化）。
+# 注意: .dockerignore は .gitignore とは独立。ここに書いたものだけが除外される。
+# BGM（worker/assets/bgm/*.mp3）は .gitignore 済みだが、イメージに必要なので
+# ここでは除外しない（明示的に残す）。
+
+# 依存・ビルド成果物
+**/node_modules
+**/.next
+**/out
+**/.venv
+**/venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.mypy_cache
+
+# フロントエンド（コンテナには不要。SWA へ別途デプロイ）
+frontend/
+
+# テスト成果物
+**/test-results
+**/playwright-report
+**/.tsbuildinfo
+
+# 秘密・ローカル環境（絶対にイメージへ入れない）
+**/.env
+**/.env.local
+**/.env.*.local
+**/cloud.env
+
+# VCS・OS
+.git
+**/.DS_Store
+
+# MediaPipe アセット（フロント用。ワーカー/バックエンド不要）
+frontend/public/mediapipe/

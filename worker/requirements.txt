@@ -8,5 +8,6 @@ azure-storage-blob
 sqlalchemy
 psycopg2-binary
 pydantic-settings
-# ラベリング（Azure OpenAI vision）実装時に追加:
+# ラベリング（vision タイトル/キャプション生成。Azure OpenAI 版・直 OpenAI 版とも使用。
+# worker/Dockerfile では "openai>=1.30" を導入済み。未導入でも定型フォールバックで動く）:
 # openai

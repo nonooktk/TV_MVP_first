@@ -42,3 +42,7 @@ worker/assets/bgm/*
 # テストキャッシュ
 .pytest_cache/
 *.tsbuildinfo
+
+# クラウド環境の秘密（A1で生成。DBパスワード・接続文字列等。絶対にコミットしない）
+cloud.env
+backend/cloud.env

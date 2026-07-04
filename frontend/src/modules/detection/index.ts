@@ -15,7 +15,10 @@
 import { AudioPipeline } from "./audioPipeline";
 import { captureBurst } from "./burst";
 import { FacePipeline } from "./facePipeline";
-import { NoopSttProvider, type SttProvider } from "./sttProvider";
+import { AzureSttProvider, type SttRuntimeState } from "./azureSttProvider";
+import { passesSharedCooldown } from "./sttConfig";
+import type { SttProvider } from "./sttProvider";
+import { DEFAULT_RMS_PARAMS } from "./rmsTrigger";
 import {
   RmsTrigger,
   type RmsTriggerEvent,
@@ -47,7 +50,11 @@ export interface AttachDetectionOptions {
   callId: string;
   /** 発火のたびに呼ばれる（バッジのフラッシュ・カウント表示に使う）。 */
   onEvent?: (ev: DetectionEvent) => void;
-  /** STT プロバイダ（未指定なら noop=削減ラダー②）。 */
+  /**
+   * STT プロバイダ。未指定なら AzureSttProvider（best-effort）を使う。
+   * Speech 未設定（Fake トークン）や SDK ロード失敗では STT 無効のまま通話・RMS検知を継続する。
+   * テストで STT を完全に無効化したい場合は NoopSttProvider を渡す。
+   */
   stt?: SttProvider;
 }
 
@@ -78,6 +85,8 @@ export interface DetectionRuntimeState {
     lastRmsDb: number | null;
     inCooldown: boolean;
   };
+  /** STT（感情ワード検知）の状態。STT 無効時は enabled=false。 */
+  stt: SttRuntimeState;
 }
 
 declare global {
@@ -92,7 +101,23 @@ declare global {
  */
 export function attachDetection(opts: AttachDetectionOptions): DetectionHandle {
   const { stream, callId, onEvent } = opts;
-  const stt: SttProvider = opts.stt ?? new NoopSttProvider();
+
+  // RMS発火と STT発火で共有するクールダウン（連打防止）。
+  // rmsTrigger は内部クールダウンを持つが、STT は別経路のため、直近発火時刻を
+  // 共有チェックして「どちらかが発火したら SHARED_COOLDOWN_MS は次を抑止」する。
+  // 値は RMS のクールダウン（4s）に合わせる。
+  const SHARED_COOLDOWN_MS = DEFAULT_RMS_PARAMS.cooldownMs; // 4000ms
+  let lastTriggerAtMs = 0;
+
+  // STT プロバイダ。未指定なら AzureSttProvider（best-effort・感情ワードで stt 発火）。
+  const stt: SttProvider =
+    opts.stt ??
+    new AzureSttProvider({
+      onEmotionHit: (_hits, _text) => {
+        // 感情ワードヒット → 共有クールダウンを通過したら stt 発火。
+        void handleTrigger(null, "stt");
+      },
+    });
 
   // トラック取得。
   const videoTrack = stream.getVideoTracks()[0] ?? null;
@@ -120,12 +145,26 @@ export function attachDetection(opts: AttachDetectionOptions): DetectionHandle {
   let busy = false; // 発火処理中の再入防止
 
   // --- 発火処理（実発火と forceTrigger の共通経路） --------------------------
-  async function handleTrigger(ev: RmsTriggerEvent | null): Promise<void> {
+  // reasonOverride を渡すと ev の reason より優先する（STT 発火は ev=null＋"stt"）。
+  async function handleTrigger(
+    ev: RmsTriggerEvent | null,
+    reasonOverride?: TriggerReason
+  ): Promise<void> {
     if (!running || busy) return;
-    busy = true;
     const triggerAtMs = Date.now();
+    // 共有クールダウン: 直近発火から SHARED_COOLDOWN_MS 未満は抑止（RMS/STT 連打防止）。
+    // forceTrigger（テスト）は reasonOverride=undefined & ev=null で来るため抑止しない。
+    const isSttOrRms = reasonOverride === "stt" || ev !== null;
+    if (
+      isSttOrRms &&
+      !passesSharedCooldown(triggerAtMs, lastTriggerAtMs, SHARED_COOLDOWN_MS)
+    ) {
+      return;
+    }
+    busy = true;
+    lastTriggerAtMs = triggerAtMs;
     const capturedAt = new Date(triggerAtMs).toISOString();
-    const reason: TriggerReason = ev?.reason ?? "rms";
+    const reason: TriggerReason = reasonOverride ?? ev?.reason ?? "rms";
     const faceScore = facePipeline?.score() ?? 0;
     const faceTop = facePipeline?.topBlendshapes() ?? [];
     const sttResult = stt.latest();
@@ -200,7 +239,10 @@ export function attachDetection(opts: AttachDetectionOptions): DetectionHandle {
   // --- 起動 -----------------------------------------------------------------
   videoRing?.start();
   void facePipeline?.start(); // ロード失敗しても throw しない（best-effort）
-  void stt.start(audioTrack!).catch(() => {});
+  // STT は音声トラックがある場合のみ起動（best-effort・失敗しても通話継続）。
+  if (audioTrack) {
+    void stt.start(audioTrack).catch(() => {});
+  }
   audioPipeline?.start();
 
   // --- テスト・観測用フック --------------------------------------------------
@@ -224,7 +266,16 @@ export function attachDetection(opts: AttachDetectionOptions): DetectionHandle {
         lastRmsDb: rms.lastRmsDb,
         inCooldown: rms.inCooldown,
       },
+      stt: sttState(),
     };
+  }
+
+  // STT 状態のスナップショット。AzureSttProvider なら実状態、それ以外（Noop 等）は無効。
+  function sttState(): SttRuntimeState {
+    if (stt instanceof AzureSttProvider) {
+      return stt.state();
+    }
+    return { enabled: false, lastText: "", labelHits: [], triggerCount: 0 };
   }
 
   if (typeof window !== "undefined") {

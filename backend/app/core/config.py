@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     AGORA_APP_ID: str = ""
     AGORA_APP_CERTIFICATE: str = ""
 
+    # Azure Speech STT（削減ラダー②解除）。両方が非空なら Real（STS の短命トークン発行）、
+    # どちらか欠けたら Fake を使う（deps.get_speech_provider で切替。Agora と同じパターン）。
+    # AZURE_SPEECH_KEY は秘密値（.env のみ。コミット・ログ出力禁止）。
+    # AZURE_SPEECH_REGION は公開値（例: japaneast）。
+    AZURE_SPEECH_KEY: str = ""
+    AZURE_SPEECH_REGION: str = ""
+
     # 登録リンク生成に使うフロントエンドのベースURL
     FRONTEND_BASE_URL: str = "http://localhost:3000"
 
