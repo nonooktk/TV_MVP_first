@@ -1,0 +1,26 @@
+# backend（FastAPI）の依存。ローカル開発・テストで実際に使う構成。
+# 本番の秘密取得（Key Vault＋マネージドID）用の azure-identity / azure-keyvault-secrets は
+# 実導入時（A1）に追加する。
+
+# --- Web フレームワーク ---
+fastapi
+uvicorn[standard]
+
+# --- Agora トークン生成（M1・A2）---
+agora-token-builder
+
+# --- DB（同期 SQLAlchemy 2.0＋Alembic＋psycopg2）---
+sqlalchemy
+alembic
+psycopg2-binary
+
+# --- 設定読み込み（.env）---
+pydantic-settings
+
+# --- Azure Storage（Blob/Queue。ローカルは Azurite で実動作）---
+azure-storage-blob
+azure-storage-queue
+
+# --- テスト ---
+pytest
+httpx

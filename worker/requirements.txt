@@ -1,0 +1,12 @@
+# worker は backend の資産（SQLAlchemy モデル・設定・paths）を再利用するため、
+# 実行には backend/.venv（backend/requirements.txt 導入済み）を使う。
+# 詳細は docs/dev-setup.md「worker の起動」を参照。
+#
+# 単体で venv を分ける場合に必要な依存は以下（backend/requirements.txt と重複）:
+azure-storage-queue
+azure-storage-blob
+sqlalchemy
+psycopg2-binary
+pydantic-settings
+# ラベリング（Azure OpenAI vision）実装時に追加:
+# openai
