@@ -1,0 +1,44 @@
+# 依存関係・ビルド成果物
+node_modules/
+.next/
+out/
+dist/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 環境変数・秘匿値
+# .env は絶対にコミットしない（本番秘密はKey Vault＋マネージドIDで管理）
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+
+# エディタ
+.vscode/
+.idea/
+
+# ログ・一時ファイル
+*.log
+tmp/
+
+# Playwright（自動通話テストの実行成果物）
+test-results/
+playwright-report/
+
+# MediaPipe アセット（node_modules から再生成可能な大容量バイナリ。
+# 配置手順は frontend/src/modules/detection/README.md を参照）
+frontend/public/mediapipe/
+
+# BGM 音源（ライセンス配慮のためリポジトリに含めない。README のみ管理）
+worker/assets/bgm/*
+!worker/assets/bgm/README.md
+
+# テストキャッシュ
+.pytest_cache/
+*.tsbuildinfo

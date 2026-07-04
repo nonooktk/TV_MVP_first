@@ -1,0 +1,47 @@
+# ローカル開発用の依存サービス（本番は Azure マネージドサービスを使う）。
+#
+# - postgres: 台帳DB。ホストポートは 5433 で公開し、既存の 5432 postgres との衝突を避ける。
+# - azurite:  Azure Storage（Blob/Queue）のローカルエミュレータ。
+#             blob=10000 / queue=10001 を公開する（table=10002 は本MVPでは未使用）。
+#
+# 起動:   docker compose up -d
+# 停止:   docker compose down          （データは volume に残る）
+# 全消去: docker compose down -v        （named volume も破棄）
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: tvmvp-postgres
+    environment:
+      POSTGRES_DB: tvmvp
+      POSTGRES_USER: tvmvp
+      POSTGRES_PASSWORD: tvmvp_dev_password
+    ports:
+      # ホスト5433 -> コンテナ5432（既存postgresとの衝突回避）
+      - "5433:5432"
+    volumes:
+      - tvmvp-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tvmvp -d tvmvp"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite
+    container_name: tvmvp-azurite
+    # blob と queue のみ待ち受ける（0.0.0.0 でコンテナ外から到達可能にする）
+    command: >
+      azurite
+      --blobHost 0.0.0.0 --blobPort 10000
+      --queueHost 0.0.0.0 --queuePort 10001
+      --location /data --skipApiVersionCheck
+    ports:
+      - "10000:10000"  # Blob
+      - "10001:10001"  # Queue
+    volumes:
+      - tvmvp-azurite:/data
+
+volumes:
+  tvmvp-pgdata:
+  tvmvp-azurite:

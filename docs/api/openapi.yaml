@@ -1,0 +1,910 @@
+openapi: 3.0.3
+info:
+  title: TV電話MVP API
+  version: 0.3.0
+  description: >
+    支給物A4。TV電話サービス「元気にしてる？」のAPI仕様。
+
+    家族側（PCブラウザ）と高齢者側（待受ページ）の2系統のクライアントを持つ。
+    認証は bearerAuth（家族側）と deviceToken（高齢者側待受ページ）の2系統。
+
+    v0.3.0（M1・Agora実接続）の契約変更:
+    ①トークン応答（CallTokenResponse / AnswerResponse）に app_id（公開値）を追加、
+    ② POST /calls/{call_id}/end を新設（両認証・冪等）、
+    ③ GET /calls/incoming は作成から120秒を超えた calling を着信として返さない（失効）。
+
+tags:
+  - name: tokens
+    description: 通話基盤（Agora）・音声認識（Azure Speech）用の短命トークン発行
+  - name: calls
+    description: 発信・着信・応答など通話ライフサイクル
+  - name: media
+    description: 通話中に検知・キャプチャした候補メディアの登録・アップロードSAS
+  - name: albums
+    description: 候補提示・5枚選択確定・ハイライトアルバムの閲覧
+  - name: links
+    description: 高齢者側デバイスの初回登録リンク発行
+  - name: devices
+    description: 高齢者側デバイスの登録（登録トークンからデバイストークンを発行）
+
+security:
+  - bearerAuth: []
+
+paths:
+  /tokens/call:
+    post:
+      tags: [tokens]
+      summary: 通話トークン発行（Agora用）
+      description: >
+        指定した通話の Agora チャンネルへ入室するための短命トークンを発行する。
+        家族側クライアントが発信・入室時に使用する。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CallTokenRequest'
+      responses:
+        '200':
+          description: 発行成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CallTokenResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /tokens/speech:
+    post:
+      tags: [tokens]
+      summary: 音声認識（Speech）用トークン発行
+      description: >
+        家族側ブラウザでの通話中 STT（Azure Speech）に用いる短命トークンを発行する。
+        リージョンは Azure 東日本で統一。
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 発行成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpeechTokenResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /calls:
+    post:
+      tags: [calls]
+      summary: 発信・通話作成
+      description: >
+        家族側からの発信で通話レコードを作成する。
+        channel_name はサーバが通話ごとにローテーション生成する（クライアント指定不可）。
+        作成直後の status は calling。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCallRequest'
+      responses:
+        '201':
+          description: 通話作成成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Call'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /calls/incoming:
+    get:
+      tags: [calls]
+      summary: 高齢者側の着信ポーリング
+      description: >
+        高齢者側の待受ページが着信状態を取得する。デバイストークンで認証する。
+        推奨ポーリング間隔は 2〜5 秒。着信中は incoming=true と call_id・family_name を返す。
+        着信として返すのは「status=calling かつ作成から120秒以内」の通話のみ
+        （放置された calling を着信として拾い続けないための失効仕様。M1）。
+      security:
+        - deviceToken: []
+      responses:
+        '200':
+          description: 着信状態取得成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IncomingStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /calls/{call_id}/answer:
+    post:
+      tags: [calls]
+      summary: 通話応答（「でる」）
+      description: >
+        高齢者側が着信に応答（「でる」）する。応答すると通話の status が active に遷移し、
+        Agora チャンネルへ入室するための短命トークンを返す。デバイストークンで認証する。
+      security:
+        - deviceToken: []
+      parameters:
+        - $ref: '#/components/parameters/CallId'
+      responses:
+        '200':
+          description: 応答成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnswerResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /calls/{call_id}/end:
+    post:
+      tags: [calls]
+      summary: 通話終了（M1で新設）
+      description: >
+        通話を明示的に終了する。家族（bearerAuth）・高齢者デバイス（deviceToken）の
+        **どちらの認証でも**呼び出せる。status を ended に遷移させ ended_at を記録する。
+        既に ended の通話に対しては何もせず 200 を返す（冪等）。
+        POST /media/register による ended 遷移（コア②の同期経路）は従来どおり併存する。
+      security:
+        - bearerAuth: []
+        - deviceToken: []
+      parameters:
+        - $ref: '#/components/parameters/CallId'
+      responses:
+        '200':
+          description: 終了成功（既に ended の場合も 200）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Call'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /media/register:
+    post:
+      tags: [media]
+      summary: 候補メディア登録
+      description: >
+        通話中に家族側ブラウザで検知・キャプチャした候補メディア（写真・音声スニペット）を
+        通話後にまとめて登録する。登録された各メディアには memory id が採番される。
+        件数が多い場合は 202 で受理し、後段の第1段ワーカー（スコアリング）へ回す。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MediaRegisterRequest'
+      responses:
+        '201':
+          description: 登録成功（同期採番）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MediaRegisterResponse'
+        '202':
+          description: 受理（非同期処理へ回付）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MediaRegisterResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /media/upload-sas:
+    post:
+      tags: [media]
+      summary: アップロード用SAS発行
+      description: >
+        家族側が候補メディアを Blob へ直接アップロードするための書き込みSAS URLを発行する。
+        SAS は当該通話のプレフィックス（families/{family_id}/calls/{call_id}/）限定・
+        create+write 権限・有効期限1時間（docs/data-contract.md §2）。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UploadSasRequest'
+      responses:
+        '200':
+          description: 発行成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadSasResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /calls/{call_id}/candidates:
+    get:
+      tags: [albums]
+      summary: 候補ランキング取得
+      description: >
+        第1段ワーカーがスコアリングした候補一覧を、家族側の選択UI向けに提示する。
+        候補には rank（順位）と閲覧用の sas_url が付く。
+        auto_confirm_at は自動確定の期限（提示から5分後）。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CallId'
+      responses:
+        '200':
+          description: 候補一覧取得成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CandidateList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /calls/{call_id}/selection:
+    post:
+      tags: [albums]
+      summary: 5枚選択確定
+      description: >
+        家族が候補から5枚を選択して確定する（memory_ids は順序保持・ちょうど5枚）。
+        自動確定は、候補提示時に可視化遅延5分で投函される auto_confirm キューメッセージを
+        ワーカーが処理して行う（詳細は docs/data-contract.md §4）。
+        確定後の再実行は差し替えとして扱い、ハイライト動画を再生成する（version を +1）。
+        再生成中（album_status=generating）に再実行した場合は 409 を返す。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CallId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SelectionRequest'
+      responses:
+        '200':
+          description: 選択確定成功（動画生成へ回付）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Album'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 生成中（generating）のため再実行不可
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /albums/latest:
+    get:
+      tags: [albums]
+      summary: 高齢者待受の最新ハイライト取得
+      description: >
+        高齢者側の待受ページが、当該デバイスに紐づく最新の ready なハイライトアルバムを取得する。
+        video_storage_key に対応する動画の SAS URL 付き。デバイストークンで認証する。
+        まだ閲覧可能なアルバムが無い場合は 404。
+      security:
+        - deviceToken: []
+      responses:
+        '200':
+          description: 取得成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Album'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: まだ閲覧可能なアルバムが無い
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /albums:
+    get:
+      tags: [albums]
+      summary: 家族の閲覧一覧
+      description: >
+        家族側の閲覧UI向けにアルバム一覧を日付降順で返す。
+        cursor / limit によるカーソルページングに対応する。
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: cursor
+          in: query
+          required: false
+          description: 前ページ応答の next_cursor を指定して続きを取得する
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: 1ページあたりの最大件数
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: 一覧取得成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlbumList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /links/register:
+    post:
+      tags: [links]
+      summary: 初回登録リンク発行
+      description: >
+        高齢者側デバイスの初回登録に使うワンタイムリンクを発行する。
+        owner ロールの家族のみ実行可能（viewer は不可）。
+        発行された URL は一度きり（one_time=true）で、期限内にアクセスするとデバイストークンが発行される。
+      security:
+        - bearerAuth: []
+      responses:
+        '201':
+          description: 発行成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterLinkResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /devices/register:
+    post:
+      tags: [devices]
+      summary: デバイス登録（登録トークン → デバイストークン）
+      description: >
+        高齢者側の待受ページが、初回登録リンクの registration_token を提示して
+        恒久的な X-Device-Token を受け取る。認証は不要（ワンタイムの登録トークンで代替）。
+        登録トークンは一度きり有効で、使用済み・不正・期限切れは拒否する。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeviceRegisterRequest'
+      responses:
+        '200':
+          description: 登録成功（デバイストークン発行）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceRegisterResponse'
+        '400':
+          description: 登録トークンの期限切れ・不正
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: 登録トークンが無効（使用済み・不一致）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        家族側クライアントの認証。MVP 期間中は固定トークンのスタブ
+        （frontend の lib/auth-stub.ts と対応）で運用し、本番では Entra External ID による
+        発行トークンへ差し替える。
+    deviceToken:
+      type: apiKey
+      in: header
+      name: X-Device-Token
+      description: >
+        高齢者側待受ページの認証。初回登録リンク（/links/register で発行）経由で
+        デバイス登録した際に発行されるトークンを X-Device-Token ヘッダで送る。
+
+  parameters:
+    CallId:
+      name: call_id
+      in: path
+      required: true
+      description: 通話ID（UUID）
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    BadRequest:
+      description: リクエスト不正
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: 認証エラー（トークン無効・欠落）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: 権限不足（ロール不足）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: 対象が存在しない
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: 状態の競合により実行不可
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    # ---- enum 定義（契約表の値をそのまま使用）----
+    UserRole:
+      type: string
+      description: 家族メンバーのロール
+      enum: [owner, viewer]
+    DeviceStatus:
+      type: string
+      description: 高齢者側デバイスの状態
+      enum: [pending, active, revoked]
+    CallStatus:
+      type: string
+      description: 通話の状態
+      enum: [calling, active, ended]
+    MemoryType:
+      type: string
+      description: 候補メディアの種別
+      enum: [photo, audio]
+    MemoryStatus:
+      type: string
+      description: 候補メディアの選択状態
+      enum: [candidate, selected]
+    AlbumStatus:
+      type: string
+      description: ハイライトアルバムの状態
+      enum: [awaiting_selection, generating, ready]
+
+    # ---- 共通エラー ----
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: エラーコード（機械可読）
+        message:
+          type: string
+          description: エラー内容（人間可読・日本語）
+
+    # ---- 主要エンティティ ----
+    Call:
+      type: object
+      required: [id, family_id, device_id, channel_name, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        family_id:
+          type: string
+          format: uuid
+        device_id:
+          type: string
+          format: uuid
+        channel_name:
+          type: string
+          description: 通話ごとにサーバがローテーション生成する Agora チャンネル名
+        status:
+          $ref: '#/components/schemas/CallStatus'
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 応答（answer）時に記録される。calling 中は null
+        ended_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >
+            通話終了時に記録される。それまでは null。
+            ended への遷移は POST /calls/{call_id}/end（M1）または
+            POST /media/register（コア②の同期経路）による
+
+    Memory:
+      type: object
+      description: 候補メディア（写真・音声スニペット）。Candidate 応答の基底となる。
+      required: [id, call_id, type, storage_key, status, captured_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        call_id:
+          type: string
+          format: uuid
+        type:
+          $ref: '#/components/schemas/MemoryType'
+        storage_key:
+          type: string
+          description: Blob 上の格納キー（非公開・SAS 経由でのみ参照）
+        score:
+          type: number
+          format: float
+          nullable: true
+          description: 第1段ワーカーが付与するスコア
+        status:
+          $ref: '#/components/schemas/MemoryStatus'
+        captured_at:
+          type: string
+          format: date-time
+        metadata:
+          type: object
+          additionalProperties: true
+          description: 検知・キャプチャ時の付随情報（自由形式）
+
+    Candidate:
+      description: 候補提示用のメディア。Memory に rank と閲覧用 sas_url を付与したもの。
+      allOf:
+        - $ref: '#/components/schemas/Memory'
+        - type: object
+          required: [rank, sas_url]
+          properties:
+            rank:
+              type: integer
+              minimum: 1
+              description: スコアに基づく提示順位
+            sas_url:
+              type: string
+              format: uri
+              description: 候補メディア閲覧用の短命 SAS URL
+
+    Album:
+      type: object
+      required: [id, call_id, status, selected_memory_ids, version]
+      properties:
+        id:
+          type: string
+          format: uuid
+        call_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/AlbumStatus'
+        selected_memory_ids:
+          type: array
+          description: 確定した5枚の memory id（順序保持）
+          items:
+            type: string
+            format: uuid
+          minItems: 5
+          maxItems: 5
+        title:
+          type: string
+          nullable: true
+        caption:
+          type: string
+          nullable: true
+        bgm_track:
+          type: string
+          nullable: true
+          description: 付与された BGM トラック識別子
+        video_storage_key:
+          type: string
+          nullable: true
+          description: 完成ハイライト動画の Blob 格納キー
+        video_sas_url:
+          type: string
+          format: uri
+          nullable: true
+          description: 完成ハイライト動画の閲覧用 SAS URL（ready 時に付く）
+        version:
+          type: integer
+          minimum: 1
+          description: 動画のバージョン。再生成のたびに +1
+        presented_at:
+          type: string
+          format: date-time
+          nullable: true
+        confirmed_at:
+          type: string
+          format: date-time
+          nullable: true
+        auto_confirmed:
+          type: boolean
+          description: 5分無選択による自動確定か否か
+
+    # ---- tokens ----
+    CallTokenRequest:
+      type: object
+      required: [call_id]
+      properties:
+        call_id:
+          type: string
+          format: uuid
+    CallTokenResponse:
+      type: object
+      required: [token, channel_name, uid, expires_at, app_id]
+      properties:
+        token:
+          type: string
+          description: Agora チャンネル入室用の短命トークン
+        channel_name:
+          type: string
+        uid:
+          type: integer
+          description: Agora の参加者 UID（uid ルールは家族=1・高齢者=2）
+        expires_at:
+          type: string
+          format: date-time
+        app_id:
+          type: string
+          description: >
+            Agora App ID（公開値）。フロントの SDK join に必要（M1・契約変更①。
+            フロント側に環境変数を重複配置しないためサーバから返す）
+    SpeechTokenResponse:
+      type: object
+      required: [token, region, expires_at]
+      properties:
+        token:
+          type: string
+          description: Azure Speech の短命トークン
+        region:
+          type: string
+          description: Azure リージョン（東日本）
+        expires_at:
+          type: string
+          format: date-time
+
+    # ---- calls ----
+    CreateCallRequest:
+      type: object
+      required: [device_id]
+      description: 発信リクエスト。channel_name はサーバ生成のため指定不可。
+      properties:
+        device_id:
+          type: string
+          format: uuid
+          description: 発信先の高齢者側デバイスID
+    IncomingStatus:
+      type: object
+      required: [incoming]
+      properties:
+        incoming:
+          type: boolean
+          description: 着信中か否か
+        call_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: 着信中の通話ID（incoming=true のとき）
+        family_name:
+          type: string
+          nullable: true
+          description: 発信元の家族表示名（incoming=true のとき）
+    AnswerResponse:
+      type: object
+      required: [token, channel_name, uid, expires_at, app_id]
+      properties:
+        token:
+          type: string
+          description: Agora チャンネル入室用の短命トークン
+        channel_name:
+          type: string
+        uid:
+          type: integer
+          description: Agora の参加者 UID（uid ルールは家族=1・高齢者=2）
+        expires_at:
+          type: string
+          format: date-time
+        app_id:
+          type: string
+          description: >
+            Agora App ID（公開値）。フロントの SDK join に必要（M1・契約変更①）
+
+    # ---- media ----
+    MediaRegisterItem:
+      type: object
+      required: [type, storage_key, captured_at]
+      properties:
+        type:
+          $ref: '#/components/schemas/MemoryType'
+        storage_key:
+          type: string
+        captured_at:
+          type: string
+          format: date-time
+        metadata:
+          type: object
+          additionalProperties: true
+    MediaRegisterRequest:
+      type: object
+      required: [call_id, items]
+      properties:
+        call_id:
+          type: string
+          format: uuid
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/MediaRegisterItem'
+    MediaRegisterResponse:
+      type: object
+      required: [memory_ids]
+      properties:
+        memory_ids:
+          type: array
+          description: 採番された memory id 配列（items と同順）
+          items:
+            type: string
+            format: uuid
+
+    UploadSasRequest:
+      type: object
+      required: [call_id, filenames]
+      properties:
+        call_id:
+          type: string
+          format: uuid
+        filenames:
+          type: array
+          minItems: 1
+          description: アップロードするファイル名（当該通話プレフィックス配下に配置される）
+          items:
+            type: string
+    UploadSasItem:
+      type: object
+      required: [filename, storage_key, upload_url]
+      properties:
+        filename:
+          type: string
+        storage_key:
+          type: string
+          description: コンテナ名を除くフルパス（families/… から始まる）
+        upload_url:
+          type: string
+          format: uri
+          description: create+write 権限付きの書き込みSAS URL
+    UploadSasResponse:
+      type: object
+      required: [items, expires_at]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/UploadSasItem'
+        expires_at:
+          type: string
+          format: date-time
+          description: SAS の有効期限（発行から1時間）
+
+    # ---- albums / candidates / selection ----
+    CandidateList:
+      type: object
+      required: [album_id, candidates]
+      properties:
+        album_id:
+          type: string
+          format: uuid
+        presented_at:
+          type: string
+          format: date-time
+          nullable: true
+        auto_confirm_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 自動確定の期限（提示から5分後）
+        candidates:
+          type: array
+          items:
+            $ref: '#/components/schemas/Candidate'
+    SelectionRequest:
+      type: object
+      required: [memory_ids]
+      properties:
+        memory_ids:
+          type: array
+          description: 選択した5枚の memory id（順序保持・ちょうど5枚）
+          items:
+            type: string
+            format: uuid
+          minItems: 5
+          maxItems: 5
+    AlbumList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          description: アルバム一覧（日付降順）
+          items:
+            $ref: '#/components/schemas/Album'
+        next_cursor:
+          type: string
+          nullable: true
+          description: 次ページ取得用カーソル。無ければ null（末尾）
+
+    # ---- links ----
+    RegisterLinkResponse:
+      type: object
+      required: [url, expires_at, one_time]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: 高齢者側デバイス登録用のワンタイムリンク
+        expires_at:
+          type: string
+          format: date-time
+        one_time:
+          type: boolean
+          description: 常に true（一度きり有効）
+          example: true
+
+    # ---- devices ----
+    DeviceRegisterRequest:
+      type: object
+      required: [registration_token]
+      properties:
+        registration_token:
+          type: string
+          description: 初回登録リンクに含まれる登録トークン（平文）
+    DeviceRegisterResponse:
+      type: object
+      required: [device_token]
+      properties:
+        device_token:
+          type: string
+          description: 以降の待受認証（X-Device-Token）に使う恒久トークン
