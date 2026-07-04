@@ -25,7 +25,11 @@ from app.services.agora import (
 )
 from app.services.blob import BlobService
 from app.services.queue import QueueService
-from app.services.speech import FakeSpeechTokenProvider, SpeechTokenProvider
+from app.services.speech import (
+    FakeSpeechTokenProvider,
+    RealSpeechTokenProvider,
+    SpeechTokenProvider,
+)
 
 
 # --- 認証 ---------------------------------------------------------------------
@@ -162,6 +166,17 @@ def get_agora_provider(
     return FakeAgoraTokenProvider()
 
 
-def get_speech_provider() -> SpeechTokenProvider:
-    """Speech トークンプロバイダを供給する（MVP は Fake）。"""
+def get_speech_provider(
+    settings: Settings = Depends(get_settings),
+) -> SpeechTokenProvider:
+    """Speech トークンプロバイダを供給する（STT: 設定に応じて自動切替）。
+
+    AZURE_SPEECH_KEY と AZURE_SPEECH_REGION の両方が非空なら Real（STS 短命トークン）、
+    どちらか欠けていれば Fake を返す（Speech 未設定のデモ環境を壊さない。Agora と同じ）。
+    """
+    if settings.AZURE_SPEECH_KEY and settings.AZURE_SPEECH_REGION:
+        return RealSpeechTokenProvider(
+            key=settings.AZURE_SPEECH_KEY,
+            region=settings.AZURE_SPEECH_REGION,
+        )
     return FakeSpeechTokenProvider()

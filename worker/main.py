@@ -29,6 +29,15 @@ if str(_WORKER_ROOT) not in sys.path:
 
 import bootstrap  # noqa: E402  backend/ を sys.path に追加する
 
+# backend/.env を os.environ へ読み込む（ファイルが無ければ何もしない）。
+# pydantic-settings は .env を Settings オブジェクトにしか反映しないため、
+# os.environ を直接参照する設定（stages/labels.py の LABEL_PROVIDER /
+# OPENAI_API_KEY / AZURE_OPENAI_* など）はここで取り込む。
+# override=False: 既存の実環境変数が優先（クラウド=Container Apps の挙動は不変）。
+from dotenv import load_dotenv  # noqa: E402  pydantic-settings の依存として導入済み
+
+load_dotenv(bootstrap.backend_root() / ".env", override=False)
+
 from app.core.config import get_settings  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
 
@@ -43,6 +52,10 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+# Azure SDK（Storage Queue/Blob）の HTTP ログは冗長でクラウドのログを埋め尽くすため
+# WARNING 以上に抑制する（業務ログ＝worker.* を読めるようにする）。
+logging.getLogger("azure").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
 logger = logging.getLogger("worker.main")
 
 # 毒メッセージ判定閾値（dequeue_count がこれを超えたら退避。data-contract.md §3）。
