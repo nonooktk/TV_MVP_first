@@ -19,10 +19,11 @@ RUN apt-get update \
 WORKDIR /app
 
 # 依存だけ先に入れてキャッシュを効かせる（backend/requirements.txt を流用。
-# worker はこの依存で動く。openai は labels 本実装で追加）。
+# worker はこの依存で動く。openai は labels 本実装で追加。
+# Pillow はサムネイル・コラージュ生成に必須（worker/requirements.txt にも記載）。
 COPY backend/requirements.txt /app/backend/requirements.txt
 RUN pip install --no-cache-dir -r /app/backend/requirements.txt \
-    && pip install --no-cache-dir "openai>=1.30"
+    && pip install --no-cache-dir "openai>=1.30" "Pillow>=10.0"
 
 # backend の app 一式（モデル・設定・サービス）と worker 一式をコピー。
 COPY backend/ /app/backend/

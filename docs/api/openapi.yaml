@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: TV電話MVP API
-  version: 0.3.0
+  version: 0.5.0
   description: >
     支給物A4。TV電話サービス「元気にしてる？」のAPI仕様。
 
@@ -12,6 +12,21 @@ info:
     ①トークン応答（CallTokenResponse / AnswerResponse）に app_id（公開値）を追加、
     ② POST /calls/{call_id}/end を新設（両認証・冪等）、
     ③ GET /calls/incoming は作成から120秒を超えた calling を着信として返さない（失効）。
+
+    v0.4.0（既知課題#5 対応）の契約変更:
+    POST /calls の device_id を省略可能にした。省略時はサーバが当該家族の
+    status=active なデバイスへ自動解決する（複数件は最新 registered_at を採用。
+    0件は 404 code="no_active_device"）。明示指定時の挙動は従来どおり。
+
+    v0.5.0（ユーザーフィードバック改善・第1段）の契約変更:
+    ① GET /albums に status クエリを追加（省略時 all＝awaiting_selection /
+       generating / ready をすべて返す。**従来は ready のみ＝互換断絶**）。
+       各要素に status・presented_at・collage_sas_url（ready かつ存在時）・
+       photos（確定5枚。awaiting_selection では空配列）を追加（N+1解消・進捗可視化）。
+    ② GET /calls/{call_id}/candidates の各候補に thumb_sas_url を追加。
+    ③ DELETE /albums/{album_id} を新設（owner のみ・完全削除・204）。
+    thumb_sas_url / collage_sas_url / photos の SAS はパス規約から導出して発行し、
+    Blob の存在チェックはしない（フロントは thumb 未生成時 sas_url にフォールバックする）。
 
 tags:
   - name: tokens
@@ -87,6 +102,13 @@ paths:
         家族側からの発信で通話レコードを作成する。
         channel_name はサーバが通話ごとにローテーション生成する（クライアント指定不可）。
         作成直後の status は calling。
+
+        device_id は省略可能（v0.4.0）。省略時はサーバが当該家族の status=active な
+        デバイスへ自動解決する（複数件あれば最新 registered_at のデバイスを採用）。
+        active なデバイスが1台も無い場合は 404（code="no_active_device"・
+        message「登録済みのデバイスがありません。相手の設定から登録してください」）を返す。
+        明示指定時は従来どおり、存在・帰属しないIDは 404（code="not_found"）、
+        active でないデバイスは 400（code="device_not_active"）。
       security:
         - bearerAuth: []
       requestBody:
@@ -107,7 +129,13 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
-          $ref: '#/components/responses/NotFound'
+          description: >
+            指定した device_id が存在しない・当該家族に帰属しない（code="not_found"）、
+            または device_id 省略時に active なデバイスが1台も無い（code="no_active_device"）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   /calls/incoming:
     get:
@@ -344,9 +372,26 @@ paths:
       description: >
         家族側の閲覧UI向けにアルバム一覧を日付降順で返す。
         cursor / limit によるカーソルページングに対応する。
+
+        v0.5.0: status クエリを追加。省略時（all）は awaiting_selection /
+        generating / ready をすべて返す（**従来は ready のみ＝互換断絶**）。
+        各要素は status・presented_at・collage_sas_url（ready かつ存在時）・
+        photos（確定5枚。awaiting_selection では空配列）を含む。
+        photos / collage の SAS はパス規約から導出して発行し、Blob の存在確認はしない
+        （thumb 未生成時はフロントが sas_url にフォールバックする）。
       security:
         - bearerAuth: []
       parameters:
+        - name: status
+          in: query
+          required: false
+          description: >
+            絞り込むアルバムのステータス。省略時（all）は awaiting_selection /
+            generating / ready をすべて返す。
+          schema:
+            type: string
+            enum: [all, awaiting_selection, generating, ready]
+            default: all
         - name: cursor
           in: query
           required: false
@@ -373,6 +418,38 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+
+  /albums/{album_id}:
+    delete:
+      tags: [albums]
+      summary: アルバムの完全削除（v0.5.0で新設）
+      description: >
+        アルバムを完全削除する（アプリ機能としてのデータ削除であり、
+        Azureリソースの削除ではない）。owner ロールの家族のみ実行可能（viewer は 403）。
+        削除対象: ① album 行 ② 動画 Blob 全バージョン（albums/v*.mp4）
+        ③ コラージュ Blob（albums/collage_v*.jpg）
+        ④ 確定5枚の memories 行とその Blob（candidates/ と thumbs/）。
+        音声スニペット（snippets/）と call 行は残す。
+        存在しない Blob の削除はスキップ（冪等）。応答は 204。
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: album_id
+          in: path
+          required: true
+          description: アルバムID（UUID）
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: 削除成功（本文なし）
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /links/register:
     post:
@@ -608,6 +685,14 @@ components:
               type: string
               format: uri
               description: 候補メディア閲覧用の短命 SAS URL
+            thumb_sas_url:
+              type: string
+              format: uri
+              nullable: true
+              description: >
+                サムネイル（幅320px）閲覧用の短命 SAS URL。パス規約
+                （thumbs/{memory_id}.jpg）から導出して発行する（存在チェックはしない。
+                未生成時はフロントが sas_url にフォールバックする）。
 
     Album:
       type: object
@@ -648,6 +733,13 @@ components:
           format: uri
           nullable: true
           description: 完成ハイライト動画の閲覧用 SAS URL（ready 時に付く）
+        collage_sas_url:
+          type: string
+          format: uri
+          nullable: true
+          description: >
+            確定5枚から生成したコラージュ画像の閲覧用 SAS URL（ready かつ存在時に付く。
+            v0.5.0）。GET /albums でのみ設定する。
         version:
           type: integer
           minimum: 1
@@ -663,6 +755,38 @@ components:
         auto_confirmed:
           type: boolean
           description: 5分無選択による自動確定か否か
+        photos:
+          type: array
+          nullable: true
+          description: >
+            確定5枚（順序保持。awaiting_selection では空配列）。GET /albums でのみ設定する
+            （個別取得系＝latest / selection の応答では null。v0.5.0・N+1解消）。
+          items:
+            $ref: '#/components/schemas/AlbumPhoto'
+
+    AlbumPhoto:
+      type: object
+      description: アルバムの確定5枚のうち1枚（一覧表示用の軽量情報。v0.5.0）。
+      required: [memory_id, sas_url]
+      properties:
+        memory_id:
+          type: string
+          format: uuid
+        thumb_sas_url:
+          type: string
+          format: uri
+          nullable: true
+          description: >
+            サムネイル（幅320px）閲覧用の短命 SAS URL。パス規約から導出して発行する
+            （存在チェックはしない。未生成時はフロントが sas_url にフォールバックする）。
+        sas_url:
+          type: string
+          format: uri
+          description: 原画像（候補）閲覧用の短命 SAS URL
+        captured_at:
+          type: string
+          format: date-time
+          nullable: true
 
     # ---- tokens ----
     CallTokenRequest:
@@ -709,13 +833,18 @@ components:
     # ---- calls ----
     CreateCallRequest:
       type: object
-      required: [device_id]
-      description: 発信リクエスト。channel_name はサーバ生成のため指定不可。
+      description: >
+        発信リクエスト。channel_name はサーバ生成のため指定不可。
+        device_id は省略可能（v0.4.0）: 省略時はサーバが当該家族の status=active な
+        デバイスへ自動解決する（複数件は最新 registered_at を採用。
+        0件は 404 code="no_active_device"）。
       properties:
         device_id:
           type: string
           format: uuid
-          description: 発信先の高齢者側デバイスID
+          nullable: true
+          description: >
+            発信先の高齢者側デバイスID（省略可能。省略時はサーバ側で自動解決）
     IncomingStatus:
       type: object
       required: [incoming]

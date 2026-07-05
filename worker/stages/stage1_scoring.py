@@ -26,7 +26,10 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import Album, Memory
+from app.core.paths import thumb_key
+from app.db.models import Album, Call, Memory
+
+from stages import images
 
 logger = logging.getLogger("worker.stage1")
 
@@ -111,7 +114,7 @@ def compute_scores(memories: list[Memory]) -> dict[UUID, float]:
     return scores
 
 
-def run(db: Session, call_id: str, queue) -> str | None:
+def run(db: Session, call_id: str, queue, blob=None) -> str | None:
     """score ジョブ本体。候補をスコアリングし album を提示する。
 
     Args:
@@ -119,6 +122,8 @@ def run(db: Session, call_id: str, queue) -> str | None:
         call_id: 対象通話 ID（文字列 UUID）。
         queue: auto_confirm を投函するキューサービス
             （enqueue_auto_confirm(album_id, delay_seconds) を持つ）。
+        blob: WorkerBlobService 互換（download / upload）。サムネイル生成に使う。
+            None のときはサムネ生成をスキップする（後方互換・テスト用）。
 
     Returns:
         作成した album_id（文字列）。skip 時は None。
@@ -144,6 +149,11 @@ def run(db: Session, call_id: str, queue) -> str | None:
     scores = compute_scores(list(photos))
     for m in photos:
         m.score = scores.get(m.id)
+
+    # 各写真候補のサムネイル（幅320px・JPEG品質70）を生成してアップロードする。
+    # 失敗は警告ログでスキップし、候補処理は止めない（軽量化はベストエフォート）。
+    if blob is not None and photos:
+        _generate_thumbnails(db, blob, call_uuid, list(photos))
 
     now = datetime.now(timezone.utc)
 
@@ -174,3 +184,41 @@ def run(db: Session, call_id: str, queue) -> str | None:
         delay,
     )
     return str(album.id)
+
+
+def _generate_thumbnails(
+    db: Session, blob, call_uuid: UUID, photos: list[Memory]
+) -> None:
+    """写真候補のサムネイルを生成して Blob へアップロードする（ベストエフォート）。
+
+    各候補の原画像（memories.storage_key）を download → 幅320px/JPEG品質70 の
+    サムネへ縮小 → thumbs/{memory_id}.jpg へ upload する。
+    個々の失敗（画像が壊れている・未アップロード等）は警告ログでスキップし、
+    候補処理全体は止めない。
+    """
+    call = db.get(Call, call_uuid)
+    if call is None:
+        logger.warning("thumbnail: call=%s が見つからないためスキップ", call_uuid)
+        return
+    family_id = call.family_id
+
+    generated = 0
+    skipped = 0
+    for mem in photos:
+        try:
+            data = blob.download(mem.storage_key)
+            thumb = images.make_thumbnail(data)
+            key = thumb_key(family_id, call_uuid, mem.id)
+            blob.upload(key, thumb, content_type="image/jpeg")
+            generated += 1
+        except Exception as e:  # noqa: BLE001
+            skipped += 1
+            logger.warning(
+                "サムネ生成に失敗（スキップ）: memory=%s key=%s err=%s",
+                mem.id,
+                mem.storage_key,
+                e,
+            )
+    logger.info(
+        "サムネ生成: call=%s generated=%d skipped=%d", call_uuid, generated, skipped
+    )

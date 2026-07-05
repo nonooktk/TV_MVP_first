@@ -39,6 +39,10 @@ os.environ.setdefault("FRONTEND_BASE_URL", "http://localhost:3000")
 # 環境変数が .env より優先されるため、空で上書きして Real への切替を防ぐ）。
 os.environ["AGORA_APP_ID"] = ""
 os.environ["AGORA_APP_CERTIFICATE"] = ""
+# Azure Speech も同様に常に Fake（dev-setup §13-7 で backend/.env に実キーを
+# 追記する運用になったため、Agora と同じく空で上書きして Real への切替を防ぐ）。
+os.environ["AZURE_SPEECH_KEY"] = ""
+os.environ["AZURE_SPEECH_REGION"] = ""
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -54,9 +58,19 @@ DEVICE_TOKEN = "dev-device-token"
 
 
 class FakeBlobService:
-    """テスト用フェイク Blob。SAS URL はダミー文字列を返す。"""
+    """テスト用フェイク Blob。SAS URL はダミー文字列を返す。
+
+    削除検証のため、存在する Blob 名を集合で保持できる（既定は空。テストが
+    `store` に事前投入することで delete_blob / delete_prefix の呼び出しを観測する）。
+    """
 
     container = "media"
+
+    def __init__(self) -> None:
+        # 存在する Blob 名の集合（テストで事前投入して削除を検証する）。
+        self.store: set[str] = set()
+        # 削除呼び出しの記録（キー名）。
+        self.deleted: list[str] = []
 
     def ensure_container(self) -> None:  # noqa: D102
         pass
@@ -68,7 +82,21 @@ class FakeBlobService:
         return f"https://fake.blob/{self.container}/{storage_key}?sig=upload"
 
     def upload(self, storage_key: str, data: bytes, content_type=None) -> None:  # noqa: D102
-        pass
+        self.store.add(storage_key)
+
+    def delete_blob(self, storage_key: str) -> bool:  # noqa: D102
+        self.deleted.append(storage_key)
+        if storage_key in self.store:
+            self.store.discard(storage_key)
+            return True
+        return False
+
+    def delete_prefix(self, prefix: str) -> int:  # noqa: D102
+        targets = [k for k in self.store if k.startswith(prefix)]
+        for k in targets:
+            self.deleted.append(k)
+            self.store.discard(k)
+        return len(targets)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -141,10 +169,16 @@ def fake_queue() -> FakeQueueService:
 
 
 @pytest.fixture
-def client(fake_queue: FakeQueueService) -> TestClient:
-    """DI をフェイクへ差し替えた TestClient。"""
+def fake_blob() -> FakeBlobService:
+    """テスト全体で共有する Fake Blob（削除・アップロードを観測できる）。"""
+    return FakeBlobService()
+
+
+@pytest.fixture
+def client(fake_queue: FakeQueueService, fake_blob: FakeBlobService) -> TestClient:
+    """DI をフェイクへ差し替えた TestClient（Blob は fake_blob を共有）。"""
     app.dependency_overrides[get_queue_service] = lambda: fake_queue
-    app.dependency_overrides[get_blob_service] = lambda: FakeBlobService()
+    app.dependency_overrides[get_blob_service] = lambda: fake_blob
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()

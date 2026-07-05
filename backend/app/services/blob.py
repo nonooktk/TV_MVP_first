@@ -108,6 +108,36 @@ class BlobService:
         blob = self._client.get_blob_client(self.container, storage_key)
         blob.upload_blob(data, overwrite=True)
 
+    # --- 削除（アプリ機能としての完全削除。Azureリソース削除ではない）--------
+
+    def delete_blob(self, storage_key: str) -> bool:
+        """単一 Blob を削除する。存在しなければ何もせず False（冪等）。
+
+        DELETE /albums の完全削除で使う。存在しない Blob のスキップは冪等要件
+        （data-contract.md ライフサイクル節）。
+        """
+        from azure.core.exceptions import ResourceNotFoundError
+
+        blob = self._client.get_blob_client(self.container, storage_key)
+        try:
+            blob.delete_blob()
+            return True
+        except ResourceNotFoundError:
+            return False
+
+    def delete_prefix(self, prefix: str) -> int:
+        """指定プレフィックス配下の Blob をすべて削除する（冪等）。
+
+        戻り値は削除した件数。存在しないプレフィックスは 0 件で返る。
+        （動画の全バージョン albums/v*.mp4 のような複数削除に使う。）
+        """
+        container = self._client.get_container_client(self.container)
+        deleted = 0
+        for blob in container.list_blobs(name_starts_with=prefix):
+            if self.delete_blob(blob.name):
+                deleted += 1
+        return deleted
+
     # --- 内部 ----------------------------------------------------------------
 
     def _account_key(self) -> str:

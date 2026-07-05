@@ -19,6 +19,11 @@ _WORKER_ROOT = Path(__file__).resolve().parents[2] / "worker"
 if str(_WORKER_ROOT) not in sys.path:
     sys.path.insert(0, str(_WORKER_ROOT))
 
+import io  # noqa: E402
+
+from PIL import Image  # noqa: E402
+
+from app.core.paths import thumb_key  # noqa: E402
 from app.db.models import Album, Call, Device, Family, Memory, User  # noqa: E402
 from stages import stage1_scoring  # noqa: E402
 
@@ -31,6 +36,28 @@ class _FakeQueue:
 
     def enqueue_auto_confirm(self, album_id: str, delay_seconds: int = 300) -> None:
         self.auto_confirm.append((album_id, delay_seconds))
+
+
+def _dummy_jpeg(w=1280, h=720) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (w, h), (200, 80, 80)).save(buf, "JPEG", quality=90)
+    return buf.getvalue()
+
+
+class _ThumbBlob:
+    """download はダミー JPEG、upload は記録するだけのフェイク Blob。"""
+
+    def __init__(self, *, fail_keys: set | None = None) -> None:
+        self.uploaded: dict[str, bytes] = {}
+        self.fail_keys = fail_keys or set()
+
+    def download(self, storage_key: str) -> bytes:
+        if storage_key in self.fail_keys:
+            raise RuntimeError("download failed (candidate not uploaded)")
+        return _dummy_jpeg()
+
+    def upload(self, storage_key: str, data: bytes, content_type=None) -> None:
+        self.uploaded[storage_key] = data
 
 
 def _make_call(db) -> Call:
@@ -173,3 +200,45 @@ def test_run_skip_when_already_presented(db):
     result = stage1_scoring.run(db, str(call.id), queue)
     assert result is None
     assert queue.auto_confirm == []
+
+
+def test_run_generates_thumbnails(db):
+    """blob を渡すと各写真候補のサムネ（thumbs/{memory_id}.jpg）を生成する。"""
+    call = _make_call(db)
+    m1 = _add_photo(db, call, rms_rise=10, face_score=0.8)
+    m2 = _add_photo(db, call, rms_rise=5, face_score=0.6)
+    db.commit()
+
+    queue = _FakeQueue()
+    blob = _ThumbBlob()
+    stage1_scoring.run(db, str(call.id), queue, blob)
+
+    # 2枚ぶんのサムネがアップロードされる。
+    k1 = thumb_key(call.family_id, call.id, m1.id)
+    k2 = thumb_key(call.family_id, call.id, m2.id)
+    assert k1 in blob.uploaded
+    assert k2 in blob.uploaded
+    # サムネは幅320px の JPEG。
+    ti = Image.open(io.BytesIO(blob.uploaded[k1]))
+    assert ti.size[0] == 320
+
+
+def test_run_thumbnail_failure_is_skipped(db):
+    """個々のサムネ生成失敗は警告スキップで、他候補・スコアリングは止めない。"""
+    call = _make_call(db)
+    m1 = _add_photo(db, call, rms_rise=10, face_score=0.8)
+    m2 = _add_photo(db, call, rms_rise=5, face_score=0.6)
+    db.commit()
+
+    queue = _FakeQueue()
+    # m1 の download を失敗させる。
+    blob = _ThumbBlob(fail_keys={m1.storage_key})
+    album_id = stage1_scoring.run(db, str(call.id), queue, blob)
+
+    assert album_id is not None  # 提示は成立する
+    k1 = thumb_key(call.family_id, call.id, m1.id)
+    k2 = thumb_key(call.family_id, call.id, m2.id)
+    assert k1 not in blob.uploaded  # 失敗ぶんは無し
+    assert k2 in blob.uploaded  # 成功ぶんはある
+    # auto_confirm も投函される（処理は完走）。
+    assert len(queue.auto_confirm) == 1

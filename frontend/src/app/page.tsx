@@ -9,7 +9,6 @@ import { useRouter } from "next/navigation";
 import {
   Album,
   ApiError,
-  DEFAULT_DEVICE_ID,
   createCall,
   getAlbums,
   registerLink,
@@ -28,6 +27,9 @@ export default function HomePage() {
   const router = useRouter();
   const [calling, setCalling] = useState(false);
   const [callError, setCallError] = useState<string | null>(null);
+  // 404 code="no_active_device"（デバイス未登録）のとき true。
+  // 「相手の設定」（登録リンク発行）への導線付きでエラーを表示する。
+  const [noActiveDevice, setNoActiveDevice] = useState(false);
 
   const [albums, setAlbums] = useState<Album[]>([]);
   const [albumsLoading, setAlbumsLoading] = useState(true);
@@ -90,19 +92,21 @@ export default function HomePage() {
   }, []);
 
   async function handleCall() {
-    if (!DEFAULT_DEVICE_ID) {
-      setCallError(
-        "発信先デバイスが未設定です（NEXT_PUBLIC_DEFAULT_DEVICE_ID を .env.local に設定してください）"
-      );
-      return;
-    }
+    // device_id は送らない（v0.4.0・既知課題#5 対応）。
+    // サーバが当該家族の active なデバイスへ自動解決する。
     setCalling(true);
     setCallError(null);
+    setNoActiveDevice(false);
     try {
-      const call = await createCall(DEFAULT_DEVICE_ID);
+      const call = await createCall();
       router.push(`/call?call_id=${call.id}`);
     } catch (e) {
-      setCallError(e instanceof ApiError ? e.message : "発信に失敗しました");
+      if (e instanceof ApiError && e.body?.code === "no_active_device") {
+        setNoActiveDevice(true);
+        setCallError(e.message);
+      } else {
+        setCallError(e instanceof ApiError ? e.message : "発信に失敗しました");
+      }
       setCalling(false);
     }
   }
@@ -132,13 +136,18 @@ export default function HomePage() {
     }
   }
 
-  // 新着バナー: 最新アルバムが24時間以内に作成（confirmed_at 基準）されたものか
-  const latest = albums[0];
+  // v0.5.0: GET /albums は全状態（awaiting_selection / generating / ready）を返す。
+  // 「さいきんのハイライト」は ready のみ、generating は作成中バナーとして扱う。
+  const readyAlbums = albums.filter((a) => a.status === "ready");
+  const hasGenerating = albums.some((a) => a.status === "generating");
+
+  // 新着バナー: 最新の ready アルバムが24時間以内に作成（confirmed_at 基準）されたものか
+  const latest = readyAlbums[0];
   const showNewBanner =
     !!latest?.confirmed_at &&
     Date.now() - new Date(latest.confirmed_at).getTime() < TWENTY_FOUR_HOURS_MS;
 
-  const highlights = albums.slice(0, 3);
+  const highlights = readyAlbums.slice(0, 3);
 
   return (
     <div className="family-shell">
@@ -153,6 +162,15 @@ export default function HomePage() {
         <div className="banner">
           あたらしい思い出がとどきました（{formatDate(latest.confirmed_at)}）
         </div>
+      )}
+
+      {hasGenerating && (
+        <a href="/album" style={{ textDecoration: "none", display: "block" }}>
+          <div className="banner">
+            <span className="spinner" style={{ marginRight: 8 }} />
+            思い出を作成中…（アルバムで進み具合が見られます）
+          </div>
+        </a>
       )}
 
       {resyncing && (
@@ -175,6 +193,15 @@ export default function HomePage() {
             {callError}
           </p>
         )}
+        {noActiveDevice && (
+          <button
+            className="btn-secondary"
+            style={{ marginTop: 8 }}
+            onClick={handleIssueLink}
+          >
+            相手の設定から登録する
+          </button>
+        )}
       </div>
 
       <section className="card">
@@ -190,13 +217,18 @@ export default function HomePage() {
         )}
         {!albumsLoading && highlights.length > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {/* 個別アルバムへの遷移（既知課題#3 解消）: /album?highlight=<album_id> で
+                該当カードへスクロール＋一時ハイライト */}
             {highlights.map((a) => (
-              <div
+              <a
                 key={a.id}
+                href={`/album?highlight=${a.id}`}
                 style={{
                   border: "1px solid var(--color-border)",
                   borderRadius: 10,
                   padding: "10px 12px",
+                  textDecoration: "none",
+                  display: "block",
                 }}
               >
                 <div style={{ fontWeight: 700, fontSize: 14 }}>
@@ -204,8 +236,9 @@ export default function HomePage() {
                 </div>
                 <div style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
                   {formatDate(a.confirmed_at)}
+                  <span style={{ marginLeft: 8, color: "var(--color-accent)" }}>見る ＞</span>
                 </div>
-              </div>
+              </a>
             ))}
           </div>
         )}

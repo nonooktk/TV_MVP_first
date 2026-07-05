@@ -46,3 +46,6 @@ worker/assets/bgm/*
 # クラウド環境の秘密（A1で生成。DBパスワード・接続文字列等。絶対にコミットしない）
 cloud.env
 backend/cloud.env
+
+# Claude Code ローカル設定（セッション用）
+.claude/

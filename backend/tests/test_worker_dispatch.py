@@ -35,7 +35,7 @@ def test_process_message_dispatches_by_job_type(monkeypatch):
 
     monkeypatch.setattr(
         worker_main.stage1_scoring, "run",
-        lambda db, call_id, queue: calls.append(f"score:{call_id}"),
+        lambda db, call_id, queue, blob: calls.append(f"score:{call_id}"),
     )
     monkeypatch.setattr(
         worker_main.auto_confirm, "run",

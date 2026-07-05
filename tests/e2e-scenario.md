@@ -37,8 +37,8 @@ RFP（コア技術外部委託バージョン）12章の動作基準と本書ス
 - ローカル環境が `docs/dev-setup.md` §1〜6 の手順で稼働していること
   （docker compose = postgres@5433＋Azurite、マイグレーション適用、seed 投入、
   uvicorn @8000、`frontend/` で `npm run dev` @3000）。
-- seed 出力の `device_id` が `frontend/.env.local` の `NEXT_PUBLIC_DEFAULT_DEVICE_ID` に
-  設定されていること。
+- （2026-07-05 更新）発信の device_id はサーバ自動解決になったため、
+  `NEXT_PUBLIC_DEFAULT_DEVICE_ID` の設定は不要（設定されていても参照されない）。
 - 以下のコマンド例で使う変数:
 
 ```bash
@@ -89,15 +89,13 @@ curl -s -w "\n%{http_code}\n" -X POST $BASE/devices/register \
 ## 2. 発信・着信「でる」
 
 **操作手順**
-1. 家族: ホームの「📞 母に電話」をクリック（API: `POST /calls`、
-   device_id は `NEXT_PUBLIC_DEFAULT_DEVICE_ID`）。`/call?call_id=...` へ遷移する。
+1. 家族: ホームの「📞 母に電話」をクリック（API: `POST /calls`。
+   device_id は送らず、サーバが active なデバイスへ自動解決する。2026-07-05 更新）。
+   `/call?call_id=...` へ遷移する。
    ※ API 直接でも可:
 
 ```bash
-DEVICE_ID=$(docker exec -i tvmvp-postgres psql -U tvmvp -d tvmvp -tAc \
-  "SELECT id FROM devices WHERE status='active' LIMIT 1;")
-curl -s -X POST $BASE/calls -H "$FAMILY" -H 'Content-Type: application/json' \
-  -d "{\"device_id\":\"$DEVICE_ID\"}"
+curl -s -X POST $BASE/calls -H "$FAMILY" -H 'Content-Type: application/json' -d '{}'
 ```
 
 2. 家族側: `/call` 遷移直後にカメラ/マイクの許可を求められるので許可する
@@ -320,22 +318,40 @@ ffprobe -v error -show_entries format=duration:stream=codec_type,codec_name -of 
 
 **操作手順**
 1. 家族: `http://localhost:3000/album` を開く。動画を再生し、5枚スタックの写真を
+   タップして拡大表示する。「動画｜コラージュ」タブを切り替え、コラージュを
    タップして拡大表示する。
-2. 家族: ホーム（`/`）に戻り、新着バナーとハイライト一覧を確認する。
-3. 高齢者側: `/elder/standby` の「さいきんの おもいで を みる」をタップ
+2. 家族: 生成中のアルバムがある場合、「思い出のムービーを作成中…」カード（スピナー付き）が
+   表示され、5秒間隔の自動更新で完成後に ready カード（動画・コラージュ）へ切り替わる
+   ことを確認する。
+3. 家族: 任意の ready アルバムの「このアルバムを削除」→ 確認ダイアログ
+   （「このアルバムを削除しますか？動画・コラージュ・選ばれた5枚の写真も完全に削除され、
+   元に戻せません」）→「削除する」で一覧から消えることを確認する
+   （API: `DELETE /albums/{album_id}`・owner のみ・204・不可逆）。
+4. 家族: ホーム（`/`）に戻り、新着バナーとハイライト一覧（カードから
+   `/album?highlight=<album_id>` で該当アルバムへ遷移）を確認する。
+5. 高齢者側: `/elder/standby` の「さいきんの おもいで を みる」をタップ
    （API: `GET /albums/latest`、X-Device-Token 認証）。
 
 **期待結果（検収観測点）**
-- 家族閲覧UI: 日付見出しごとにアルバムが並び、各カードにハイライト動画（再生可能・
-  duration≈30秒）と選択5枚のスタック表示。写真タップで拡大モーダル。
+- 家族閲覧UI: 日付見出しごとにアルバムが並び、状態別カードで表示される。
+  - `awaiting_selection`: 「ベストショットの選択待ち」＋選択ページへのボタン
+  - `generating`: 「思い出のムービーを作成中…（目安30秒〜1分）」＋スピナー。
+    5秒間隔ポーリングで ready になると自動でカードが切り替わる
+  - `ready`: 「動画｜コラージュ」タブ切替（コラージュ未生成時はタブ非表示＝動画のみ）＋
+    選択5枚のサムネスタック（thumb 未生成時は原寸に自動フォールバック）＋削除ボタン
+- 写真タップで拡大モーダル（原寸表示）。コラージュタップで拡大。
+- アルバム削除: 確認ダイアログ→204→一覧から即時除去（動画・コラージュ・確定5枚の
+  Blob と memories 行も削除。音声スニペット・call 行は残る）。
 - ホームに「あたらしい思い出がとどきました」バナー（最新アルバムの確定が24時間以内のとき）。
+  generating のアルバムがあれば「思い出を作成中…」バナー。
 - 高齢者待受: 当該デバイスに紐づく**最新の ready アルバム**の動画が全画面で自動再生され、
   「とじる」で待受に復帰する。まだ無い場合は「まだ おもいでは ありません」。
 - **家族の閲覧UIと高齢者側待受ページの双方で再生できる**。［RFP12 コア③］
 
 **現時点の代替**: なし（実装済みの正式経路そのもの）。
-※ 実装注記: 閲覧UIの写真スタックは `GET /albums` に写真一覧が無いため
-`GET /calls/{call_id}/candidates` と `selected_memory_ids` の突合で取得している（既存API制約）。
+※ 実装注記（2026-07-05 更新）: 閲覧UIの写真スタックは `GET /albums` の `photos`
+（確定5枚・thumb_sas_url/sas_url）を直接使う（v0.5.0・API呼び出しは一覧1回。
+旧 `GET /calls/{call_id}/candidates` 突合＝N+1 は撤去済み）。
 
 ---
 

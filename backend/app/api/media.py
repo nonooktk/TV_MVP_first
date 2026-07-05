@@ -19,9 +19,10 @@ from app.api.deps import (
     get_queue_service,
     require_family,
 )
-from app.core.paths import call_prefix
+from app.core.paths import call_prefix, thumb_key
 from app.db.models import Album, Call, Memory, User
 from app.schemas import (
+    AlbumPhoto,
     AlbumResponse,
     Candidate,
     CandidateList,
@@ -153,6 +154,9 @@ def get_candidates(
 
     candidates: list[Candidate] = []
     for rank, mem in enumerate(photos_sorted, start=1):
+        # thumb はパス規約から導出して SAS を発行する（存在チェックはしない。
+        # 未生成時はフロントが sas_url にフォールバックする）。
+        tkey = thumb_key(call.family_id, call.id, mem.id)
         candidates.append(
             Candidate(
                 id=mem.id,
@@ -165,6 +169,7 @@ def get_candidates(
                 metadata=mem.meta_ or {},
                 rank=rank,
                 sas_url=blob.view_sas_url(mem.storage_key),
+                thumb_sas_url=blob.view_sas_url(tkey),
             )
         )
 
@@ -254,7 +259,12 @@ def submit_selection(
     return _album_to_response(album)
 
 
-def _album_to_response(album: Album, video_sas_url: str | None = None) -> AlbumResponse:
+def _album_to_response(
+    album: Album,
+    video_sas_url: str | None = None,
+    collage_sas_url: str | None = None,
+    photos: list[AlbumPhoto] | None = None,
+) -> AlbumResponse:
     """Album モデルをレスポンススキーマへ変換する。"""
     selected = (
         [UUID(x) for x in album.selected_memory_ids]
@@ -271,8 +281,10 @@ def _album_to_response(album: Album, video_sas_url: str | None = None) -> AlbumR
         bgm_track=album.bgm_track,
         video_storage_key=album.video_storage_key,
         video_sas_url=video_sas_url,
+        collage_sas_url=collage_sas_url,
         version=album.version,
         presented_at=album.presented_at,
         confirmed_at=album.confirmed_at,
         auto_confirmed=album.auto_confirmed,
+        photos=photos,
     )

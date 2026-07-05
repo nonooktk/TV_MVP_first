@@ -42,18 +42,43 @@ def create_call(
     user: User = Depends(require_family),
     db: Session = Depends(get_db),
 ) -> CallResponse:
-    """発信・通話を作成する（家族側）。channel_name はサーバ生成。"""
-    device = db.get(Device, body.device_id)
-    if device is None or device.family_id != user.family_id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"code": "not_found", "message": "デバイスが見つかりません"},
-        )
-    if device.status != "active":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"code": "device_not_active", "message": "デバイスが有効ではありません"},
-        )
+    """発信・通話を作成する（家族側）。channel_name はサーバ生成。
+
+    device_id は省略可能（既知課題#5 対応・2026-07-05）:
+    - 省略時: 当該家族の status=active なデバイスへ自動解決する。
+      複数件あれば最新 registered_at（NULL は最古扱い）を採用。
+      0件なら 404 code="no_active_device"。
+    - 明示指定時: 従来どおり存在・帰属（404）と active（400）を検証する。
+    """
+    if body.device_id is not None:
+        device = db.get(Device, body.device_id)
+        if device is None or device.family_id != user.family_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "not_found", "message": "デバイスが見つかりません"},
+            )
+        if device.status != "active":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "device_not_active", "message": "デバイスが有効ではありません"},
+            )
+    else:
+        device = db.scalars(
+            select(Device)
+            .where(
+                Device.family_id == user.family_id,
+                Device.status == "active",
+            )
+            .order_by(Device.registered_at.desc().nulls_last())
+        ).first()
+        if device is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "no_active_device",
+                    "message": "登録済みのデバイスがありません。相手の設定から登録してください",
+                },
+            )
 
     call = Call(
         family_id=user.family_id,
