@@ -116,6 +116,10 @@ def test_candidates_ranking(client, seeded, db, family_headers):
     assert scores == sorted(scores, reverse=True)
     assert [c["rank"] for c in body["candidates"]] == [1, 2, 3, 4, 5, 6]
     assert body["candidates"][0]["sas_url"]
+    # thumb_sas_url がパス規約から導出されて付く（thumbs/{memory_id}.jpg）。
+    top = body["candidates"][0]
+    assert top["thumb_sas_url"]
+    assert f"thumbs/{top['id']}.jpg" in top["thumb_sas_url"]
     assert body["auto_confirm_at"] is not None
 
 

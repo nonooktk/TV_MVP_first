@@ -8,6 +8,8 @@ azure-storage-blob
 sqlalchemy
 psycopg2-binary
 pydantic-settings
+# サムネイル・コラージュ生成（第1段=サムネ／第2段=コラージュ。Pillow）。
+Pillow
 # ラベリング（vision タイトル/キャプション生成。Azure OpenAI 版・直 OpenAI 版とも使用。
 # worker/Dockerfile では "openai>=1.30" を導入済み。未導入でも定型フォールバックで動く）:
 # openai

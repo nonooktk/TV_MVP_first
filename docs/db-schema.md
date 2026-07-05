@@ -2,7 +2,8 @@
 
 支給物A3。テーブル一覧と主要カラム（クラス図準拠）。
 モデル実装: `backend/app/db/models.py`／マイグレーション: `0001_initial`
-（`backend/app/db/migrations/versions/0001_initial.py`）。
+（`backend/app/db/migrations/versions/0001_initial.py`）＋
+`0002_album_collage`（albums に `collage_storage_key` を追加）。
 
 全テーブル共通: `id` = UUID v4 主キー、`created_at` = timestamptz（server_default `now()`）。
 
@@ -26,7 +27,7 @@
 | `devices` | id, family_id（FK→families）, fixed_contact_user_id（FK→users・固定通話相手）, status（`pending` / `active` / `revoked`・default `pending`）, registration_token_hash（初回登録リンクのトークンハッシュ・nullable）, registration_expires_at（nullable）, registered_at（nullable）, device_token_hash（待受認証用 X-Device-Token のハッシュ・nullable）, created_at |
 | `calls` | id, family_id（FK→families）, device_id（FK→devices）, caller_user_id（FK→users・nullable）, channel_name（通話ごとにローテーション）, status（`calling` / `active` / `ended`・default `calling`）, started_at（nullable）, ended_at（nullable）, created_at |
 | `memories` | id, call_id（FK→calls）, type（`photo` / `audio`）, storage_key（Blob参照）, score（float・nullable）, status（`candidate` / `selected`・default `candidate`）, captured_at, metadata（JSONB・default `{}`）, created_at |
-| `albums` | id, call_id（FK→calls・**unique**・1通話に0..1）, status（`awaiting_selection` / `generating` / `ready`・default `awaiting_selection`）, selected_memory_ids（JSONB・確定5枚の memory id 配列・順序保持・確定前はnull可）, title（nullable）, caption（nullable）, bgm_track（nullable）, video_storage_key（nullable）, version（int・default 0・再生成で+1）, presented_at（候補提示時刻・5分自動確定の基準・nullable）, confirmed_at（nullable）, auto_confirmed（bool・default false）, created_at |
+| `albums` | id, call_id（FK→calls・**unique**・1通話に0..1）, status（`awaiting_selection` / `generating` / `ready`・default `awaiting_selection`）, selected_memory_ids（JSONB・確定5枚の memory id 配列・順序保持・確定前はnull可）, title（nullable）, caption（nullable）, bgm_track（nullable）, video_storage_key（nullable）, collage_storage_key（コラージュ画像のBlob参照・nullable・第2段で生成）, version（int・default 0・再生成で+1）, presented_at（候補提示時刻・5分自動確定の基準・nullable）, confirmed_at（nullable）, auto_confirmed（bool・default false）, created_at |
 
 ## ENUM（PostgreSQLネイティブ）
 

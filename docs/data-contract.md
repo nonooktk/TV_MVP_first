@@ -26,10 +26,21 @@ Blobパス規約およびキューメッセージ形式の確定仕様。
 
 ```
 families/{family_id}/calls/{call_id}/
-├── candidates/{memory_id}.jpg      # 連写候補（JPEG）
-├── snippets/{memory_id}.webm       # 音声スニペット（WebM/Opus。MediaRecorder標準）
-└── albums/v{version}.mp4           # ハイライト動画（MP4: H.264+AAC）
+├── candidates/{memory_id}.jpg          # 連写候補（JPEG）
+├── thumbs/{memory_id}.jpg              # 候補サムネイル（JPEG・幅320px・品質70。第1段で生成）
+├── snippets/{memory_id}.webm           # 音声スニペット（WebM/Opus。MediaRecorder標準）
+├── albums/v{version}.mp4               # ハイライト動画（MP4: H.264+AAC）
+└── albums/collage_v{version}.jpg       # コラージュ画像（JPEG・横1600px・第2段で生成）
 ```
+
+- **サムネイル（`thumbs/`）**: 第1段（stage1_scoring）が各写真候補の原画像から幅320px・
+  JPEG品質70のサムネを生成する（軽量化の本命）。ファイル名は `candidates/` と同じ
+  `{memory_id}.jpg`。生成失敗は警告ログでスキップし、候補処理は止めない
+  （閲覧側は未生成時に原画像 SAS へフォールバックする）。
+- **コラージュ（`albums/collage_v{version}.jpg`）**: 第2段（render）が確定5枚から1枚の
+  コラージュ JPEG（横1600px・2行グリッド〈上段2枚・下段3枚〉・白余白）を生成する。
+  動画と同じく `version` をパスに含め、再生成時は上書きしない。生成失敗は警告ログのみで
+  `albums.collage_storage_key` を null のままにする（動画は成立させる）。
 
 ### 命名規則
 
@@ -44,6 +55,9 @@ families/{family_id}/calls/{call_id}/
 - 例:
   - `memories.storage_key` = `families/{family_id}/calls/{call_id}/candidates/{memory_id}.jpg`
   - `albums.video_storage_key` = `families/{family_id}/calls/{call_id}/albums/v{version}.mp4`
+  - `albums.collage_storage_key` = `families/{family_id}/calls/{call_id}/albums/collage_v{version}.jpg`
+- サムネイル（`thumbs/`）は DB 列を持たない。パス規約（`thumbs/{memory_id}.jpg`）から
+  導出して SAS を発行する（存在チェックはしない）。
 
 ### バージョニング（動画）
 
@@ -69,6 +83,20 @@ families/{family_id}/calls/{call_id}/
   MVP期間中は、ワーカーによる `delete_after` タグ付与までを必須要件とし、実際の削除は手動運用でもよい
   （被験者はチーム内の役者であり、実運用ユーザーのPIIが残留するリスクがないため）。
 - **選択された5枚（`memories.status = selected`）と生成済みの動画（`albums` の各バージョン）は削除しない。**
+
+### ライフサイクル（アルバムの完全削除）
+
+`DELETE /albums/{album_id}`（owner のみ・API契約は openapi.yaml v0.5.0）による削除は、
+アプリ機能としてのデータ削除であり Azure リソースの削除ではない。削除セマンティクスは次のとおり。
+
+- 削除対象:
+  1. `album` 行。
+  2. 動画 Blob の**全バージョン**（`albums/v*.mp4`）。
+  3. コラージュ Blob（`albums/collage_v*.jpg`）。
+  4. **確定5枚**の `memories` 行とその Blob（`candidates/{memory_id}.jpg` と `thumbs/{memory_id}.jpg`）。
+- **残すもの**: 音声スニペット（`snippets/`）と `call` 行（および未選択候補の行・Blob。
+  これらは `delete_after` タグ運用に委ねる）。
+- Blob 削除は**存在しないものをスキップ**する（冪等）。応答は 204。
 
 ## 3. キューメッセージ形式
 

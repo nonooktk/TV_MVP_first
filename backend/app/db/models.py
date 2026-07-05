@@ -289,6 +289,9 @@ class Album(Base):
     caption: Mapped[str | None] = mapped_column(String, nullable=True)
     bgm_track: Mapped[str | None] = mapped_column(String, nullable=True)
     video_storage_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 確定5枚から生成する1枚のコラージュ画像の Blob 参照（第2段 render で生成）。
+    # 未生成・生成失敗時は null（動画は成立させる）。
+    collage_storage_key: Mapped[str | None] = mapped_column(String, nullable=True)
     # 第2段レンダリングごとに +1
     version: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0")

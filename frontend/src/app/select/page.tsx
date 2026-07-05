@@ -3,10 +3,17 @@
 // ベストショット選択画面（内製）
 // GET /calls/{call_id}/candidates で候補一覧を取得し、5枚選択→確定する。
 // auto_confirm_at から自動確定までの残り時間をカウントダウン表示する。
+//
+// v0.5.0（フィードバック改善 第2段）:
+// - 候補グリッドは thumb_sas_url（幅320pxサムネ）を表示（未生成時は sas_url へ
+//   フォールバック＝components/ThumbImage）
+// - 確定後はアルバムページへ遷移する（生成中カードが見える。?highlight=<album_id>）
 
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ApiError, Candidate, getCandidates, submitSelection } from "../../lib/api-client";
+import BackHeader from "../../components/BackHeader";
+import ThumbImage from "../../components/ThumbImage";
 
 const REQUIRED_COUNT = 5;
 
@@ -131,10 +138,13 @@ function SelectPageInner() {
         <div className="card">
           <h2>選択を確定しました</h2>
           <p style={{ fontSize: 14, color: "var(--color-text-muted)" }}>
-            ハイライト動画を生成しています。しばらくしてからアルバムでご確認ください。
+            思い出のムービーを作成しています。アルバムページで生成状況を確認できます。
           </p>
-          <button className="btn-primary" onClick={() => router.push("/album")}>
-            アルバムを見る
+          <button
+            className="btn-primary"
+            onClick={() => router.push(`/album?highlight=${confirmedAlbumId}`)}
+          >
+            アルバムを見る（作成中の様子が見えます）
           </button>
         </div>
       </div>
@@ -143,6 +153,7 @@ function SelectPageInner() {
 
   return (
     <div className="family-shell">
+      <BackHeader />
       <h1 style={{ fontSize: 20 }}>ベストショットを5枚選ぶ</h1>
 
       {loading && <p>読み込み中…</p>}
@@ -213,9 +224,9 @@ function SelectPageInner() {
                     background: "#eee",
                   }}
                 >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={c.sas_url}
+                  <ThumbImage
+                    thumbSrc={c.thumb_sas_url}
+                    fallbackSrc={c.sas_url}
                     alt={`候補 rank ${c.rank}`}
                     style={{ width: "100%", aspectRatio: "1 / 1", objectFit: "cover", display: "block" }}
                   />

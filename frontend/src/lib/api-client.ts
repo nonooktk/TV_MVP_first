@@ -12,8 +12,6 @@ import { getAuthToken } from "./auth-stub";
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
-export const DEFAULT_DEVICE_ID = process.env.NEXT_PUBLIC_DEFAULT_DEVICE_ID ?? "";
-
 const DEVICE_TOKEN_STORAGE_KEY = "device_token";
 
 export function getDeviceToken(): string | null {
@@ -167,6 +165,9 @@ export interface Candidate {
   metadata: Record<string, unknown>;
   rank: number;
   sas_url: string;
+  // サムネイル（幅320px）SAS URL（v0.5.0）。パス規約から導出発行され Blob の存在保証なし。
+  // 未生成時はフロントが sas_url にフォールバックする（components/ThumbImage）。
+  thumb_sas_url: string | null;
 }
 
 export interface CandidateList {
@@ -174,6 +175,16 @@ export interface CandidateList {
   presented_at: string | null;
   auto_confirm_at: string | null;
   candidates: Candidate[];
+}
+
+// アルバムの確定5枚のうち1枚（一覧表示用の軽量情報。v0.5.0）
+export interface AlbumPhoto {
+  memory_id: string;
+  // サムネイル（幅320px）SAS URL。存在保証なし（未生成時は sas_url にフォールバック）。
+  thumb_sas_url: string | null;
+  // 原画像（候補）SAS URL
+  sas_url: string;
+  captured_at: string | null;
 }
 
 export interface Album {
@@ -186,10 +197,15 @@ export interface Album {
   bgm_track: string | null;
   video_storage_key: string | null;
   video_sas_url: string | null;
+  // コラージュ画像の SAS URL（ready かつ存在時。GET /albums でのみ設定。v0.5.0）
+  collage_sas_url: string | null;
   version: number;
   presented_at: string | null;
   confirmed_at: string | null;
   auto_confirmed: boolean;
+  // 確定5枚（順序保持。awaiting_selection では空配列。GET /albums でのみ設定。
+  // 個別取得系＝latest / selection の応答では null。v0.5.0・N+1解消）
+  photos: AlbumPhoto[] | null;
 }
 
 export interface AlbumList {
@@ -248,11 +264,14 @@ export async function issueSpeechToken(): Promise<SpeechTokenResponse> {
 
 // --- calls --------------------------------------------------------------------
 
-export async function createCall(deviceId: string): Promise<Call> {
+// 発信（通話作成）。deviceId は省略可能（v0.4.0・既知課題#5 対応）:
+// 省略時はサーバが当該家族の active なデバイスへ自動解決する。
+// active なデバイスが無い場合は 404 code="no_active_device" が返る。
+export async function createCall(deviceId?: string): Promise<Call> {
   return request<Call>("/calls", {
     method: "POST",
     auth: "family",
-    body: { device_id: deviceId },
+    body: deviceId ? { device_id: deviceId } : {},
   });
 }
 
@@ -333,14 +352,26 @@ export async function getLatestAlbum(): Promise<Album> {
   });
 }
 
+// アルバム一覧取得（v0.5.0: status クエリ対応。省略時 all＝
+// awaiting_selection / generating / ready をすべて返す）。
 export async function getAlbums(
   cursor?: string,
-  limit?: number
+  limit?: number,
+  status?: AlbumStatus | "all"
 ): Promise<AlbumList> {
   return request<AlbumList>("/albums", {
     method: "GET",
     auth: "family",
-    query: { cursor, limit },
+    query: { cursor, limit, status },
+  });
+}
+
+// アルバムの完全削除（v0.5.0）。owner のみ（viewer は 403）。
+// 動画・コラージュ・確定5枚の写真（原寸・サムネ）が完全に削除され、元に戻せない。
+export async function deleteAlbum(albumId: string): Promise<void> {
+  return request<void>(`/albums/${albumId}`, {
+    method: "DELETE",
+    auth: "family",
   });
 }
 

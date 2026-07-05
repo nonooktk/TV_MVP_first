@@ -21,20 +21,37 @@ _WORKER_ROOT = Path(__file__).resolve().parents[2] / "worker"
 if str(_WORKER_ROOT) not in sys.path:
     sys.path.insert(0, str(_WORKER_ROOT))
 
+import io  # noqa: E402
+
+from PIL import Image  # noqa: E402
+
 from app.db.models import Album, Call, Device, Family, Memory, User  # noqa: E402
 from stages import ffmpeg_render, stage2_video  # noqa: E402
 from stages.ffmpeg_render import _xfade_offsets  # noqa: E402
 
 
-class _FakeBlob:
-    """download はダミー bytes、upload/タグ付与は記録するだけ。"""
+def _dummy_jpeg(w=1280, h=720) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (w, h), (80, 120, 200)).save(buf, "JPEG", quality=90)
+    return buf.getvalue()
 
-    def __init__(self, *, tags_supported: bool = True) -> None:
+
+class _FakeBlob:
+    """download はダミー bytes、upload/タグ付与は記録するだけ。
+
+    real_images=True のとき download は Pillow で開ける本物の JPEG を返す
+    （コラージュ生成の検証用）。既定は非画像バイト（コラージュは失敗＝None）。
+    """
+
+    def __init__(self, *, tags_supported: bool = True, real_images: bool = False) -> None:
         self.uploaded: dict[str, bytes] = {}
         self.tagged: list[tuple[str, str]] = []
         self.tags_supported = tags_supported
+        self.real_images = real_images
 
     def download(self, storage_key: str) -> bytes:
+        if self.real_images:
+            return _dummy_jpeg()
         return b"\xff\xd8\xff\xe0dummy-jpeg"
 
     def upload(self, storage_key: str, data: bytes, content_type=None) -> None:
@@ -223,3 +240,42 @@ def test_xfade_offsets_recomputed_for_fewer_photos():
     assert _xfade_offsets(3) == [6, 12]
     assert _xfade_offsets(2) == [6]
     assert _xfade_offsets(1) == []
+
+
+# --- コラージュ生成 -----------------------------------------------------------
+
+
+def test_render_generates_collage(db, monkeypatch):
+    """render で確定5枚から1枚のコラージュ JPEG を生成し collage_storage_key を更新する。"""
+    call, album, selected, extras = _setup(db)
+    monkeypatch.setattr(ffmpeg_render, "render", _fake_render_factory({}))
+
+    blob = _FakeBlob(real_images=True)
+    ok = stage2_video.run(db, str(album.id), blob, bgm_dir=Path("/nonexistent"))
+    assert ok is True
+
+    db.refresh(album)
+    expected_collage = (
+        f"families/{call.family_id}/calls/{call.id}/albums/collage_v1.jpg"
+    )
+    assert album.collage_storage_key == expected_collage
+    assert expected_collage in blob.uploaded
+    # 実生成された JPEG は幅1600px。
+    ci = Image.open(io.BytesIO(blob.uploaded[expected_collage]))
+    assert ci.size[0] == 1600
+
+
+def test_render_collage_failure_keeps_video(db, monkeypatch):
+    """コラージュ生成が失敗しても動画は成立し collage_storage_key は None。"""
+    call, album, selected, extras = _setup(db)
+    monkeypatch.setattr(ffmpeg_render, "render", _fake_render_factory({}))
+
+    # real_images=False → download は非画像バイト → make_collage が失敗。
+    blob = _FakeBlob(real_images=False)
+    ok = stage2_video.run(db, str(album.id), blob, bgm_dir=Path("/nonexistent"))
+    assert ok is True
+
+    db.refresh(album)
+    assert album.status == "ready"
+    assert album.video_storage_key is not None  # 動画は成立
+    assert album.collage_storage_key is None  # コラージュは null

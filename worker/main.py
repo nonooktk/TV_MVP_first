@@ -96,7 +96,7 @@ def process_message(message, *, db_factory, blob, queue) -> None:
     db = db_factory()
     try:
         if job_type == "score":
-            stage1_scoring.run(db, body["call_id"], queue)
+            stage1_scoring.run(db, body["call_id"], queue, blob)
         elif job_type == "auto_confirm":
             auto_confirm.run(db, body["album_id"], queue)
         elif job_type == "render":

@@ -77,6 +77,105 @@ BGM 付きハイライト動画を生成、家族の閲覧 UI と高齢者側の
 
 ## 現在の状態（2026-07-05）
 
+- **ユーザーフィードバック改善 第2段（frontend＋クラウド反映＋計測）完了（2026-07-05）**:
+  - **frontend（新 GET /albums へ全面移行）**:
+    - 共通コンポーネント `components/ThumbImage.tsx`（thumb_sas_url 優先・onError で
+      sas_url へ自動フォールバック・`loading="lazy"` 既定）と `components/BackHeader.tsx`
+      （「← ホームへ」。album / select に設置）を新設。
+    - `album/page.tsx` 全面書き換え: **candidates 突合の N+1 コードを削除**し `photos` を
+      直接使用（アルバム一覧の API 呼び出しは `/albums` 1回のみ）。状態別カード
+      （awaiting_selection=選択待ち＋選択ページボタン／generating=スピナー＋
+      「作成中…（目安30秒〜1分）」・**5秒間隔ポーリングで ready へ自動切替**／
+      ready=「動画｜コラージュ」タブ〈collage_sas_url null 時はタブ非表示〉＋5枚サムネ
+      スタック〈拡大は原寸〉＋**削除ボタン**〈指定文言の確認ダイアログ→DELETE→一覧から除去〉）。
+      `?highlight=<album_id>` で該当カードへスクロール＋一時ハイライト。
+    - `select/page.tsx`: 候補グリッドを thumb_sas_url 表示（フォールバック付き）に変更。
+      確定後の遷移先を `/album?highlight=<album_id>`（生成中カードが見える）に変更。
+    - 家族ホーム: ハイライトカードに `/album?highlight=<id>` への遷移を付与
+      （**既知課題#3 解消**）。generating があれば「思い出を作成中…」バナー。
+      一覧が全状態を返すようになったため、ハイライト/新着バナーは ready のみで判定。
+    - 高齢者待受: 変更なし（backend `/albums/latest` は ready のみ返す実装を確認・崩れなし）。
+    - `api-client.ts`: `AlbumPhoto` 型・`Album.collage_sas_url/photos`・
+      `Candidate.thumb_sas_url`・`deleteAlbum()`・`getAlbums(status)` を追加。
+  - **クラウド反映（順序: DB→worker→api→SWA）**: クラウドDBへ alembic 0002 適用
+    （0001→0002・`alembic current`=0002 確認）。worker **v3**（Pillow入り）→
+    `ca-tvmvp-worker` rev 0000007。api **v3** → `ca-tvmvp-api` rev 0000006・/healthz 200。
+    frontend をクラウドURL埋め込みで再ビルド→SWA デプロイ（チャンクハッシュ一致確認）。
+    クラウド GET /albums が新形式（status/photos5枚/collage_sas_url）で返ること・既存 ready
+    3件が photos 付きで返ることを確認（過去データは thumbs 未生成→フォールバック=仕様どおり）。
+  - **クラウド実地検証（API直叩きデモ通話）**: upload→register→worker v3 が thumbs
+    5/5 生成→selection→render で**コラージュ生成（約264KB）**→ready→**DELETE 204・
+    一覧から消失**まで一巡（検証データは削除済み）。
+  - **軽量化の計測**:
+    - 転送量（クラウド新規デモ通話・1280x720 ダミーJPEG）: 原寸5枚合計 **1,779,577 bytes**
+      → サムネ5枚合計 **26,186 bytes**（**削減率 98.5%**）。
+      参考（ローカル・detection-chain の実キャプチャ640x480）: 46,640 → 18,112 bytes（61.2%。
+      原寸が小さいほど削減率は下がる）。クラウド既存 ready アルバム（過去データ・thumbs
+      未生成）の原寸5枚合計は 211,885 bytes（旧方式相当の実測値）。
+    - API 呼び出し数（アルバム一覧表示）: 旧 **1+N**（N=アルバム件数。20件なら21回）→
+      新 **1回**。実ブラウザで `/albums` 1回・`/calls/{id}/candidates` 0回を確認。
+  - 検証: pytest 104件・vitest 18件・`next build` 成功・**Playwright 2本**
+    （call.spec.ts / detection-chain.spec.ts）パス（UI変更によるセレクタ修正は不要だった）。
+    ローカル実ブラウザでタブ切替・削除フロー（ダイアログ文言・204・一覧除去）・
+    フォールバック表示・選択待ちカードを目視確認。
+  - ドキュメント: tests/e2e-scenario.md ステップ7 を更新（状態別カード・コラージュ・削除）。
+    `.claude/launch.json`（frontend-dev プレビュー設定）を追加。
+
+- **ユーザーフィードバック改善 第1段（backend＋worker＋契約・マイグレーション）
+  完了（2026-07-05・openapi v0.5.0）**:
+  - **サムネイル生成（軽量化の本命）**: worker 第1段（stage1_scoring）が各写真候補の
+    サムネ（**幅320px・JPEG品質70**・Pillow）を生成し `.../thumbs/{memory_id}.jpg` へ
+    アップロード（`worker/stages/images.py`）。生成失敗は警告ログでスキップ（候補処理は
+    止めない）。Pillow を worker/requirements.txt と worker/Dockerfile（backend/requirements.txt
+    経由でないため pip 行に明示追加）へ導入。
+  - **GET /albums 拡張（N+1解消＋進捗可視化）**: `status` クエリ（省略時 all＝
+    awaiting_selection / generating / ready をすべて返す。**従来は ready のみ＝互換断絶。
+    フロント対応は第2段**）。各要素に `status`・`presented_at`・`collage_sas_url`（ready かつ
+    存在時）・`photos`（確定5枚。awaiting_selection では空配列。`{memory_id, thumb_sas_url,
+    sas_url, captured_at}`）を追加。確定5枚の memory を一括取得して N+1 を解消。
+    GET /calls/{call_id}/candidates の各候補にも `thumb_sas_url` を追加。SAS はパス規約から
+    導出して発行し存在チェックはしない（フロントは thumb 未生成時 sas_url にフォールバック）。
+  - **DELETE /albums/{album_id} 新設（完全削除）**: 家族 Bearer かつ **role=owner のみ**
+    （viewer は 403）。削除対象は ①album 行 ②動画 Blob 全版（albums/v*.mp4）③コラージュ Blob
+    ④確定5枚の memories 行とその Blob（candidates/・thumbs/）。音声スニペット・call 行は残す。
+    Blob 削除は存在しないものをスキップ（冪等）。応答 204。アプリ機能としてのデータ削除で
+    Azureリソース削除ではない（`BlobService.delete_blob`/`delete_prefix` を追加）。
+  - **コラージュ生成（スキーマ変更を含む）**: db-schema.md → models.py → **マイグレーション
+    0002_album_collage**（albums に `collage_storage_key` nullable 追加。オフライン --sql 確認後
+    ローカル実DBへ適用済み・head=0002）。worker 第2段（render）が確定5枚から**1枚のコラージュ
+    JPEG**（横1600px・2行グリッド〈上段2枚・下段3枚〉・白余白・各セルはアスペクト維持クロップ）
+    を生成し `.../albums/collage_v{version}.jpg` へ保存、`collage_storage_key` を更新。生成失敗は
+    警告ログのみ（動画は成立）。
+  - 検証: **pytest 104件全パス**（91＋新規13: /albums の status・photos・collage／DELETE の
+    owner204・viewer403・Blob削除・冪等／candidates の thumb_sas_url／worker のサムネ生成・
+    失敗スキップ・コラージュ生成・失敗時null）。openapi v0.5.0 を validator 通過。マイグレーション
+    0002 適用済み。**ローカル通し確認**（demo_pipeline＋worker --once・実Azurite）で thumbs 6枚生成・
+    /albums が photos5＋status＝ready＋collage_sas_url を返す・コラージュ Blob 約42KB 実在・
+    DELETE で album 行＋確定5 memory 行＋動画/コラージュ Blob が消えることを観測。
+  - **既知課題（GET /albums に写真なし＝N+1）解消**。frontend 対応とクラウド反映は
+    **第2段で完了**（上記 2026-07-05 の項を参照）。
+
+- **既知課題#5（device_id 焼き込み）解消（2026-07-05・openapi v0.4.0）**:
+  - 事象: クラウドで発信時「デバイスが見つかりません」。フロントの発信が build 時埋め込みの
+    `NEXT_PUBLIC_DEFAULT_DEVICE_ID` に依存し、SWA ビルドにローカルDBの ID が焼き込まれていた。
+  - backend: `POST /calls` の `device_id` を**省略可能**に（openapi.yaml v0.4.0・validator 通過）。
+    省略時は当該家族の status=active なデバイスへ自動解決（複数件は最新 `registered_at` を採用・
+    NULL は最古扱い）。0件は 404 `code="no_active_device"`・メッセージ
+    「登録済みのデバイスがありません。相手の設定から登録してください」。明示指定時の挙動は従来どおり。
+  - frontend: 発信から `NEXT_PUBLIC_DEFAULT_DEVICE_ID` 依存を除去（`createCall()` は device_id を
+    送らない。`api-client.ts` の `DEFAULT_DEVICE_ID` エクスポートも削除）。
+    404 `no_active_device` 時は「相手の設定から登録する」ボタン（登録リンク発行モーダルへの導線）を表示。
+    `frontend/.env.example` に該当行は元々無し（`.env.local` 運用のみ）のため変更なし。
+  - conftest 修正: `AZURE_SPEECH_KEY/REGION` をテスト時に空上書き（Agora と同じパターン。
+    §13-7 で backend/.env に実キーが入ったことによる Speech テスト回帰4件を解消）。
+  - 検証: pytest 91件（新規4件: 省略時解決・active無し404・複数件時最新採用・明示指定維持）／
+    vitest 18件／`next build` 成功（成果物 grep で `DEFAULT_DEVICE_ID` 非混入・クラウドAPI URL
+    焼き込みを確認）。
+  - クラウド反映: api イメージ **`tvmvp-api:v2`**（明示バージョンタグ・latest 不変）で再ビルド→
+    `ca-tvmvp-api` 更新（rev 0000005）。frontend 再ビルド→SWA 再デプロイ（配信ハッシュ一致確認）。
+    **クラウドで `POST /calls`（device_id なし・Bearer）が 201 で自動解決されることを curl 確認済み**
+    （検証で作成した call は `/end` で終了済み）。
+
 - **STT 完了（2026-07-05・削減ラダー②解除＝Azure Speech による感情ワード検知）**:
   - Azure Speech リソース `speech-tvmvp-73bb`（**F0**・japaneast・タグ `app=tvmvp owner=mitsuru`）を作成。
     キー/region は `backend/cloud.env`（`.gitignore` 済み）に記録（コミット・ログ出力禁止）。
@@ -220,19 +319,25 @@ BGM 付きハイライト動画を生成、家族の閲覧 UI と高齢者側の
   1. ~~通話を ended にする明示APIが無い~~ → **M1 で解消**（POST /calls/{call_id}/end ＋
      incoming の120秒失効）
   2. ready 後の /select 再確定に「確定済み」表示が無い（意図せぬ再生成を誘発しうる）
-  3. ホームの「さいきんのハイライト」カードに個別アルバムへのリンクが無い
+  3. ~~ホームの「さいきんのハイライト」カードに個別アルバムへのリンクが無い~~
+     → **2026-07-05 フィードバック改善 第2段で解消**（`/album?highlight=<album_id>` 遷移）
   4. demo のダミー画像は番号なし単色（.venv に Pillow 追加で改善可）
-  5. 家族側デバイス一覧APIなし／GET /albums に写真なし（Phase 3 の制約と同じ）
+  5. ~~家族側デバイス一覧APIなし（発信が NEXT_PUBLIC_DEFAULT_DEVICE_ID 焼き込みに依存）~~
+     → **2026-07-05 に解消（POST /calls の device_id 自動解決）**。
+     ~~GET /albums に写真なし（Phase 3 の制約と同じ）は残存~~
+     → **2026-07-05 フィードバック改善 第1段で解消（GET /albums が photos を返す）**
 - **Phase 3 完了（2026-07-03）**: frontend 内製UI本実装（`frontend/src/app/` 全6ページ
   ＋`lib/api-client.ts`・`lib/auth-stub.ts` 連携・`globals.css`）。
   backend は `app/main.py` に CORS（`allow_origins=["http://localhost:3000"]`）のみ追加。
   `next build` 成功・実backend（docker compose＋uvicorn＋seed済み）で
   elder register→standby ポーリング／select 候補表示／album 一覧・動画再生を
   ブラウザ実疎通確認済み（詳細は次項の制約・注意点を参照）。
-  - 制約: 家族側にデバイス一覧APIが無い（1家族1デバイス固定設計）ため、
+  - ~~制約: 家族側にデバイス一覧APIが無い（1家族1デバイス固定設計）ため、
     発信ボタンの device_id は `frontend/.env.local` の
-    `NEXT_PUBLIC_DEFAULT_DEVICE_ID`（seed.py 出力値）を暫定使用。
-    複数デバイス対応時は backend にデバイス一覧APIの追加が必要。
+    `NEXT_PUBLIC_DEFAULT_DEVICE_ID`（seed.py 出力値）を暫定使用。~~
+    → **2026-07-05 に解消**: POST /calls の device_id 省略時サーバ自動解決に変更し、
+    フロントの環境変数依存を撤去（上記「既知課題#5 解消」参照）。
+    複数デバイスの明示的な選択UIが必要になった場合はデバイス一覧APIの追加が必要（変わらず）。
   - 制約: `GET /albums` は写真一覧を返さないため、album ページは
     `selected_memory_ids` を `GET /calls/{call_id}/candidates` の結果と
     突合して sas_url を得ている（N+1・既存API内で実現）。

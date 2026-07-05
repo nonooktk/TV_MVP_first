@@ -38,7 +38,9 @@ class SpeechTokenResponse(BaseModel):
 
 
 class CreateCallRequest(BaseModel):
-    device_id: UUID
+    # device_id は省略可能（既知課題#5 対応・2026-07-05）。省略時はサーバ側で
+    # 当該家族の status=active なデバイスへ自動解決する（複数件は最新 registered_at を採用）。
+    device_id: UUID | None = None
 
 
 class CallResponse(BaseModel):
@@ -126,6 +128,9 @@ class Candidate(BaseModel):
     metadata: dict = Field(default_factory=dict)
     rank: int
     sas_url: str
+    # サムネイル（幅320px）閲覧用の短命 SAS URL。パス規約から導出して発行する
+    # （存在チェックはしない。未生成時はフロントが sas_url にフォールバックする）。
+    thumb_sas_url: str | None = None
 
 
 class CandidateList(BaseModel):
@@ -141,6 +146,19 @@ class SelectionRequest(BaseModel):
     caption: str | None = None
 
 
+class AlbumPhoto(BaseModel):
+    """アルバムの確定5枚のうち1枚（一覧表示用の軽量情報）。
+
+    thumb_sas_url / sas_url はパス規約から導出して発行する（存在チェックはしない。
+    thumb 未生成時はフロントが sas_url にフォールバックする）。
+    """
+
+    memory_id: UUID
+    thumb_sas_url: str | None = None
+    sas_url: str
+    captured_at: datetime | None = None
+
+
 class AlbumResponse(BaseModel):
     id: UUID
     call_id: UUID
@@ -151,10 +169,15 @@ class AlbumResponse(BaseModel):
     bgm_track: str | None = None
     video_storage_key: str | None = None
     video_sas_url: str | None = None
+    # コラージュ画像（確定5枚から生成）の閲覧用 SAS URL（ready かつ存在時）。
+    collage_sas_url: str | None = None
     version: int
     presented_at: datetime | None = None
     confirmed_at: datetime | None = None
     auto_confirmed: bool = False
+    # 確定5枚（awaiting_selection では空配列）。一覧（GET /albums）でのみ設定する。
+    # 個別取得系（latest / selection の応答）では省略（null）。
+    photos: list[AlbumPhoto] | None = None
 
 
 class AlbumList(BaseModel):

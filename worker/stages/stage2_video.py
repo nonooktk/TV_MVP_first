@@ -20,10 +20,10 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.paths import album_video_key, snippet_key
+from app.core.paths import album_collage_key, album_video_key, snippet_key
 from app.db.models import Album, Call, Memory
 
-from stages import ffmpeg_render
+from stages import ffmpeg_render, images
 from stages.labels import get_label_provider
 
 logger = logging.getLogger("worker.stage2")
@@ -134,8 +134,14 @@ def run(db: Session, album_id: str, blob, *, bgm_dir: Path | None = None) -> boo
         video_key = album_video_key(family_id, call_id, version)
         blob.upload(video_key, output.read_bytes(), content_type="video/mp4")
 
+        # 5.5) コラージュ生成（確定5枚から1枚）。失敗は警告のみ（動画は成立させる）。
+        collage_key = _generate_collage(
+            blob, family_id, call_id, version, photo_paths
+        )
+
         # 6) album 更新。
         album.video_storage_key = video_key
+        album.collage_storage_key = collage_key
         album.version = version
         album.status = "ready"
         db.commit()
@@ -143,8 +149,50 @@ def run(db: Session, album_id: str, blob, *, bgm_dir: Path | None = None) -> boo
     # 7) 未選択候補に delete_after タグを付与する。
     _tag_unselected(db, blob, family_id, call_id, selected_set=set(selected_ids))
 
-    logger.info("render 完了: album=%s version=%d key=%s", album_id, version, video_key)
+    logger.info(
+        "render 完了: album=%s version=%d key=%s collage=%s",
+        album_id,
+        version,
+        video_key,
+        album.collage_storage_key,
+    )
     return True
+
+
+def _generate_collage(
+    blob,
+    family_id: UUID,
+    call_id: UUID,
+    version: int,
+    photo_paths: list[Path],
+) -> str | None:
+    """確定5枚から1枚のコラージュ JPEG を生成して Blob へ保存する。
+
+    生成・アップロードに失敗した場合は警告ログのみを出して None を返す
+    （動画は成立させる。data-contract.md §2 のコラージュパス規約に従う）。
+
+    Returns:
+        コラージュの storage_key。失敗時は None。
+    """
+    try:
+        image_bytes = [p.read_bytes() for p in photo_paths]
+        collage = images.make_collage(image_bytes)
+        collage_key = album_collage_key(family_id, call_id, version)
+        blob.upload(collage_key, collage, content_type="image/jpeg")
+        logger.info(
+            "コラージュ生成: call=%s key=%s bytes=%d",
+            call_id,
+            collage_key,
+            len(collage),
+        )
+        return collage_key
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "コラージュ生成に失敗（動画は成立・collage は null）: call=%s err=%s",
+            call_id,
+            e,
+        )
+        return None
 
 
 def _tag_unselected(
