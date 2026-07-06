@@ -19,6 +19,7 @@ _WORKER_ROOT = Path(__file__).resolve().parents[2] / "worker"
 if str(_WORKER_ROOT) not in sys.path:
     sys.path.insert(0, str(_WORKER_ROOT))
 
+from stages.call_context import CallContext  # noqa: E402
 from stages.labels import (  # noqa: E402
     AzureOpenAILabelProvider,
     FallbackLabelProvider,
@@ -169,15 +170,20 @@ class TestAutoSelection:
 
 
 class _FakeChatClient:
-    """chat.completions.create が固定テキストを返す（または例外を投げる）フェイク。"""
+    """chat.completions.create が固定テキストを返す（または例外を投げる）フェイク。
+
+    呼び出し時の kwargs を last_kwargs に記録する（プロンプト内容の検証用）。
+    """
 
     def __init__(self, text: str | None = None, error: Exception | None = None):
         self._text = text
         self._error = error
+        self.last_kwargs: dict | None = None
         outer = self
 
         class _Completions:
             def create(self, **kwargs):
+                outer.last_kwargs = kwargs
                 if outer._error is not None:
                     raise outer._error
                 msg = type("Msg", (), {"content": outer._text})()
@@ -185,6 +191,13 @@ class _FakeChatClient:
                 return type("Resp", (), {"choices": [choice]})()
 
         self.chat = type("Chat", (), {"completions": _Completions()})()
+
+
+def _prompt_text(client: _FakeChatClient) -> str:
+    """フェイクに記録された呼び出しからプロンプト（text パート）を取り出す。"""
+    assert client.last_kwargs is not None
+    content = client.last_kwargs["messages"][0]["content"]
+    return "\n".join(p["text"] for p in content if p.get("type") == "text")
 
 
 class TestVisionGenerate:
@@ -236,3 +249,68 @@ class TestVisionGenerate:
         labels = provider.generate(_CALL_DATE, 5, photo_paths=[self._photo(tmp_path)])
         assert labels.title == "夕方の団らん"
         assert labels.caption == "元気な顔が見られた日"
+
+    # --- 文脈付きプロンプト・JSON 応答（2026-07-06 改善1） -------------------
+
+    def test_json_response_parsed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """JSON {"title","caption"} 応答をパースする（新形式が第一）。"""
+        provider = OpenAILabelProvider(api_key="sk-test")
+        fake = _FakeChatClient(
+            text='{"title": "かわいいねの午後", "caption": "笑顔がこぼれたお茶の時間"}'
+        )
+        monkeypatch.setattr(provider, "_create_client", lambda: (fake, "gpt-4o-mini"))
+        labels = provider.generate(_CALL_DATE, 5, photo_paths=[self._photo(tmp_path)])
+        assert labels.title == "かわいいねの午後"
+        assert labels.caption == "笑顔がこぼれたお茶の時間"
+
+    def test_json_response_with_code_fence(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """コードフェンス付き JSON もパースできる。"""
+        provider = OpenAILabelProvider(api_key="sk-test")
+        fake = _FakeChatClient(
+            text='```json\n{"title": "夕方の乾杯", "caption": "元気な声が響いた"}\n```'
+        )
+        monkeypatch.setattr(provider, "_create_client", lambda: (fake, "gpt-4o-mini"))
+        labels = provider.generate(_CALL_DATE, 5, photo_paths=[self._photo(tmp_path)])
+        assert labels.title == "夕方の乾杯"
+        assert labels.caption == "元気な声が響いた"
+
+    def test_context_included_in_prompt(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """context を渡すと通話文脈がプロンプトに反映される（OpenAI／Azure 共用の共通実装）。"""
+        provider = OpenAILabelProvider(api_key="sk-test")
+        fake = _FakeChatClient(text='{"title": "t", "caption": "c"}')
+        monkeypatch.setattr(provider, "_create_client", lambda: (fake, "gpt-4o-mini"))
+        context = CallContext(
+            datetime_label="2026年7月4日・夕方",
+            stt_excerpt="かわいいね／また来てね",
+            stt_labels=("かわいい",),
+            trigger_summary="声の盛り上がり3回・感情ワード1回",
+        )
+        provider.generate(
+            _CALL_DATE, 5, photo_paths=[self._photo(tmp_path)], context=context
+        )
+        prompt = _prompt_text(fake)
+        assert "- 通話日時: 2026年7月4日・夕方" in prompt
+        assert "- 会話から聞き取れた言葉（抜粋）: かわいいね／また来てね" in prompt
+        assert "- 検知した感情ワード: かわいい" in prompt
+        assert "- 撮影のきっかけ: 声の盛り上がり3回・感情ワード1回" in prompt
+        assert '- JSON {"title": "...", "caption": "..."} のみを返す' in prompt
+
+    def test_no_context_uses_datetime_only_prompt(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """context 省略時も共通ビルダーで日時のみのプロンプトを組み立てる（後方互換）。"""
+        provider = OpenAILabelProvider(api_key="sk-test")
+        fake = _FakeChatClient(text='{"title": "t", "caption": "c"}')
+        monkeypatch.setattr(provider, "_create_client", lambda: (fake, "gpt-4o-mini"))
+        provider.generate(_CALL_DATE, 5, photo_paths=[self._photo(tmp_path)])
+        prompt = _prompt_text(fake)
+        # _CALL_DATE = UTC 10:00 → JST 19:00 = 夜。
+        assert "- 通話日時: 2026年7月4日・夜" in prompt
+        assert "会話から聞き取れた言葉" not in prompt
+        assert "撮影のきっかけ" not in prompt

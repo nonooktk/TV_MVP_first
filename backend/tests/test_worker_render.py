@@ -242,6 +242,55 @@ def test_xfade_offsets_recomputed_for_fewer_photos():
     assert _xfade_offsets(1) == []
 
 
+# --- 通話文脈のラベリング連携（2026-07-06 改善1） -----------------------------
+
+
+def test_render_passes_call_context_to_label_provider(db, monkeypatch):
+    """stage2 が確定5枚の metadata から通話文脈を組み立てて generate へ渡す。"""
+    call, album, selected, extras = _setup(db)
+    # 確定5枚に stt_text / stt_labels / trigger_reason を持たせる。
+    for i, m in enumerate(selected):
+        m.meta_ = {
+            "stt_text": "かわいいね" if i < 2 else "また来てね",
+            "stt_labels": ["かわいい"] if i == 0 else [],
+            "trigger_reason": "stt" if i == 0 else "rms",
+        }
+    db.commit()
+
+    monkeypatch.setattr(ffmpeg_render, "render", _fake_render_factory({}))
+
+    captured: dict = {}
+
+    class _RecorderProvider:
+        def generate(self, call_date, photo_count, photo_paths=None, context=None):
+            captured["call_date"] = call_date
+            captured["context"] = context
+            from stages.labels import Labels
+
+            return Labels(title="文脈タイトル", caption="文脈キャプション")
+
+    monkeypatch.setattr(
+        stage2_video, "get_label_provider", lambda: _RecorderProvider()
+    )
+
+    ok = stage2_video.run(db, str(album.id), _FakeBlob(), bgm_dir=Path("/nonexistent"))
+    assert ok is True
+
+    ctx = captured["context"]
+    assert ctx is not None
+    # call.started_at = UTC 2026-07-03 09:00 → JST 18:00 = 夕方。
+    assert ctx.datetime_label == "2026年7月3日・夕方"
+    # stt_text は重複除去して連結。
+    assert ctx.stt_excerpt == "かわいいね／また来てね"
+    assert ctx.stt_labels == ("かわいい",)
+    # trigger 内訳（rms4回・stt1回）。
+    assert ctx.trigger_summary == "声の盛り上がり4回・感情ワード1回"
+
+    db.refresh(album)
+    assert album.title == "文脈タイトル"
+    assert album.caption == "文脈キャプション"
+
+
 # --- コラージュ生成 -----------------------------------------------------------
 
 

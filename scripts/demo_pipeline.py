@@ -187,12 +187,21 @@ def _upload_candidates(
         put.raise_for_status()
 
         # metadata: rms_rise を段階的に、face_score をばらつかせる。
+        # stt_text / stt_labels / trigger_reason は文脈付きラベリング
+        # （worker/stages/call_context.py）の通し検証用。
         if idx == 0:
             meta = {"rms_rise": 2.0, "face_score": 0.05}  # 無表情ゲート対象
         else:
             meta = {
                 "rms_rise": float(idx * 2),
                 "face_score": round(0.3 + 0.08 * idx, 3),
+                "trigger_reason": "stt" if idx == 2 else "rms",
+                "stt_text": (
+                    "かわいいねえ、こっち向いて笑って"
+                    if idx % 2 == 0
+                    else "おかげさまで毎日元気にしてるよ、庭の朝顔が咲いたの"
+                ),
+                "stt_labels": ["かわいい"] if idx == 2 else [],
             }
         results.append((item["storage_key"], meta))
     return results

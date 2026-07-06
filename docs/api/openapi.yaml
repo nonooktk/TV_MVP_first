@@ -514,9 +514,28 @@ components:
       type: http
       scheme: bearer
       description: >
-        家族側クライアントの認証。MVP 期間中は固定トークンのスタブ
-        （frontend の lib/auth-stub.ts と対応）で運用し、本番では Entra External ID による
-        発行トークンへ差し替える。
+        家族側クライアントの認証。3種類の Bearer トークンを Authorization: Bearer で受け付ける
+        （マルチプロバイダ選択式サインイン）。dev トークンは一致で解決、それ以外は JWT の iss を
+        未検証デコードで覗いて発行者に応じて検証器へ振り分ける（backend app/api/deps.py::require_family）。
+
+        1. Microsoft Entra ID — v2.0 アクセストークン（個人 Microsoft アカウント対応・SPA/PKCE・
+           スコープ api://{client_id}/access_as_user）を JWKS で署名検証する（app/core/entra.py）。
+           主体キー auth_id=`entra:{oid}`。ENTRA_CLIENT_ID 設定時のみ有効。
+
+        2. Google アカウント — Google Identity Services（GIS）が発行する ID トークン（RS256）を
+           JWKS（www.googleapis.com/oauth2/v3/certs）で署名検証する（app/core/google.py・
+           iss=accounts.google.com 系・aud=GOOGLE_CLIENT_ID）。主体キー auth_id=`google:{sub}`。
+           GOOGLE_CLIENT_ID 設定時のみ有効。
+
+        3. 開発用固定トークン（DEV_FAMILY_TOKEN・frontend の lib/auth-stub.ts と対応）は
+           テスト家族限定の裏口として併存する（本番前に無効化）。
+
+        初回ログイン時にその auth_id 用の家族＋owner ユーザーを自動作成し、以後はその家族へ解決する
+        （Google/Entra 共用）。auth_id はプロバイダ接頭辞（google: / entra:）を付け、プロバイダ間・
+        他人間で家族スコープを分離する。
+
+        多段構え: ENTRA_CLIENT_ID / GOOGLE_CLIENT_ID がいずれも未設定（有効化待ち）の環境では
+        JWT 検証は行わず、開発用固定トークンのみで動作する。
     deviceToken:
       type: apiKey
       in: header

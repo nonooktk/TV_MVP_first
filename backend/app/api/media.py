@@ -66,8 +66,29 @@ def register_media(
     db: Session = Depends(get_db),
     queue: QueueService = Depends(get_queue_service),
 ) -> MediaRegisterResponse:
-    """候補メディアを登録し、通話を終了扱いにして score ジョブを投函する。"""
+    """候補メディアを登録し、通話を終了扱いにして score ジョブを投函する。
+
+    冪等性（多重同期対策）: 当該通話に album が既に存在し提示済み（presented_at あり）の
+    場合、これは同期のリトライ／再同期による重複 register とみなす。候補が二重に
+    増えて採点・提示が壊れるのを防ぐため、**新規メモリを追加せず**、既存の写真候補の
+    memory_ids を返して 201 とする（score の再投函もしない。クライアントは 201 を受けて
+    IndexedDB を掃除できる）。
+    参照: docs/data-contract.md §3（冪等性）。
+    """
     call = _owned_call(db, body.call_id, user)
+
+    # 既に提示済み album があるなら重複同期。候補を汚さずに既存 memory_ids を返す。
+    existing_album = db.scalars(
+        select(Album).where(Album.call_id == call.id)
+    ).first()
+    if existing_album is not None and existing_album.presented_at is not None:
+        existing_ids = [
+            m.id
+            for m in db.scalars(
+                select(Memory).where(Memory.call_id == call.id)
+            ).all()
+        ]
+        return MediaRegisterResponse(memory_ids=existing_ids)
 
     memory_ids: list[UUID] = []
     for item in body.items:

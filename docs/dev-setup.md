@@ -355,6 +355,71 @@ album ready までを1本で自動判定する。テスト本体は
 dev サーバのアセット提供が壊れ、ページの JS が 404 になる（症状: 待受ページが
 ポーリングを開始しない等）。壊れた場合は `next dev` を再起動する。
 
+### 12-4. 本番ビルドでの表情検知ロード回帰テスト（Playwright・2026-07-05）
+
+**目的**: dev（`next dev`）ではなく **本番ビルド（`next build` の `out/` 静的成果物）** で、
+表情検知（MediaPipe FaceLandmarker）のアセットがロードでき、face health が loading/failed で
+固まらず no_face/ok へ到達することを assert する。テスト本体は
+`frontend/tests-e2e/prod-face-load.spec.ts`。
+
+> **なぜ dev では気づけなかったか**: dev はアセットをディスクから即時配信するため常に成功する。
+> 本番（Azure SWA Free）は 9.4MB の WASM・3.7MB のモデルの配信を強く throttle するため、
+> 当初のローカル配信（`/mediapipe/`）では起動タイムアウト（10s）内に届かず「表情検知が停止中」に
+> なった。修正で CDN 優先（jsDelivr／Google Storage）＋ローカル fallback に変更済み。
+> この回帰テストは **本番ビルドを別ポートで配信**して検証する（dev と本番の差分を突く）。
+
+`next dev`（:3000）を**止めてから**、別ターミナルで本番ビルドを静的配信する:
+
+```bash
+cd /Users/mitsuru/Desktop/MyDocs/outputs/TV_MVP/frontend
+
+# 1) 本番ビルド（out/ に生成。API はローカル backend を指す）
+NEXT_PUBLIC_API_BASE_URL="http://localhost:8000" npx next build
+
+# 2) out/ を静的配信（:4173）。serve は .wasm を application/wasm で返す（SWA 相当）
+npx --yes serve out -l 4173 --no-clipboard
+```
+
+backend（uvicorn）は **CORS に `http://localhost:4173` を追加**して起動する（本番配信オリジンの
+模擬。ローカル repro 専用。既定の localhost:3000 は自動で維持される）:
+
+```bash
+cd /Users/mitsuru/Desktop/MyDocs/outputs/TV_MVP/backend
+CORS_ALLOW_ORIGINS="http://localhost:3000,http://localhost:4173" \
+  .venv/bin/uvicorn app.main:app --port 8000
+```
+
+この状態で回帰テストを実行する:
+
+```bash
+cd /Users/mitsuru/Desktop/MyDocs/outputs/TV_MVP/frontend
+npx playwright test tests-e2e/prod-face-load.spec.ts
+```
+
+- 観測ログ: `本番ビルド face: loaded=true failed=false loadMs=<ms> source=cdn health=no_face`。
+  `source` はロード成功元（`cdn`＝本命／`local`＝CDN 不可時の fallback）。
+- assert: face health が loading/failed で固まらず `no_face`/`ok` へ到達・`loaded=true`。
+
+### 12-5. 通話画面のデバッグパネル（ボタン方式＋?debug=1・2026-07-07）
+
+両側の通話系画面に、右下（家族側）/左上（高齢者側）の小さな**「デバッグ」ボタン**
+（`data-testid="debug-toggle"`）があり、押すと統合デバッグパネルを開閉できる。
+従来どおり **URL に `?debug=1` を付けると初期表示ON**（後方互換）。表示値は 200ms 間隔、
+IndexedDB 件数のみ1秒間隔の軽いポーリング。パネルは等幅小フォント・半透明・スクロール可。
+
+- **家族側 `/call`**（`data-testid="debug-panel"`）: セクション別に表示する。
+  - 発火: rms_dB / baseline_dB / rise / sustain / cooldown残 / busy / triggers
+  - パラメータ現在値: rise_th(+6dB) / sustainMs(150ms) / cooldownMs(4s) /
+    vadFloor（動的値） / warmup 状態（中/済・τ1s→4s/3s）
+  - 表情: health（ok/no_face/failed+理由） / face_score / source(cdn/local) / loadMs
+  - STT: enabled / 直近テキスト（末尾30字） / labelヒット / stt起因発火数
+  - 写真（この通話）: 発火回数 / IndexedDB 保存写真枚数 / 音声スニペット数 / 最終キャプチャ時刻
+  - 自分側マイク autogain: level / ema / gain（`window.__autoGainFamily`）
+- **高齢者側 `/elder/standby`（通話中のみ）**（`data-testid="autogain-debug"`）:
+  autogain（level/ema/gain＝`window.__autoGain`）・接続状態（joined/remote＝
+  `window.__callState`）・デバイス登録状態
+- 注意: デバッグボタンは MVP 検証用。**本番公開前に非表示化を判断する**（CLAUDE.md の課題参照）。
+
 ## 13. クラウド環境（Azure・A1）
 
 A1 で Azure 東日本に本番相当の環境を構築済み（リソース一覧・URL・月額は `infra/README.md`）。
@@ -515,6 +580,149 @@ grep -E '^AZURE_SPEECH_(KEY|REGION)=' cloud.env >> .env   # 値を表示せず .
 > フロント（`AzureSttProvider`）は `/tokens/speech` から短命トークンを取得し約9分ごとに更新する。
 > Fake トークン（未設定時）では SDK 接続が認証失敗するが best-effort で STT 無効のまま継続する
 > （通話・RMS検知に影響なし）。Playwright はこの Fake トークン経路で走る。
+
+### 13-8. 家族側ログインの有効化（マルチプロバイダ・選択式サインイン）
+
+家族側ログインは **Google アカウント** と **Microsoft Entra ID**（個人 Microsoft アカウント）の
+2 プロバイダに対応し、**有効なプロバイダのボタンだけを出す選択式サインイン画面**になる。
+どちらのクライアントID も後から環境変数で注入する多段構えのため、**どちらか一方だけの有効化**も、
+**両方の有効化**も、**どちらも無効（dev トークン運用）** も選べる。
+
+- backend の振り分け: dev トークン一致は従来どおり。それ以外は JWT の iss を未検証デコードで覗き、
+  Google（iss=accounts.google.com 系）→ `GOOGLE_CLIENT_ID` で検証（auth_id=`google:{sub}`）、
+  それ以外 → `ENTRA_CLIENT_ID` で検証（auth_id=`entra:{oid}`）。未設定プロバイダは 401。
+- どちらのクライアントID も空なら、ログイン UI は出ず dev トークンのみで動作する
+  （既存の pytest / Playwright / デモは無変更で通る）。
+
+**(A) Google の有効化（クライアントID発行済み）**
+
+Google Cloud コンソールの「OAuth 2.0 クライアント ID（ウェブ アプリケーション）」で、
+承認済みの JavaScript 生成元に各環境のオリジン（`http://localhost:3000` と SWA の URL）を登録する
+（GIS は生成元でトークン発行を制御する。クライアントシークレットは使わない＝ID トークンのみ）。
+
+発行済みクライアントID（公開値）:
+`1079731061136-b4qeaf52n55ukqhop8ft3khg6pmf67a2.apps.googleusercontent.com`
+
+backend（`GOOGLE_CLIENT_ID` を設定して再起動。ローカルは backend/.env に1行）:
+
+```bash
+cd /Users/mitsuru/Desktop/MyDocs/outputs/TV_MVP/backend
+echo 'GOOGLE_CLIENT_ID=1079731061136-b4qeaf52n55ukqhop8ft3khg6pmf67a2.apps.googleusercontent.com' >> .env
+.venv/bin/uvicorn app.main:app --reload --port 8000
+```
+
+クラウド（`ca-tvmvp-api`。**シークレットではないので --set-env-vars 直指定でよい**・イメージ再ビルド不要）:
+
+```bash
+az containerapp update -g rg-001-gen12 -n ca-tvmvp-api \
+  --set-env-vars "GOOGLE_CLIENT_ID=1079731061136-b4qeaf52n55ukqhop8ft3khg6pmf67a2.apps.googleusercontent.com"
+```
+
+frontend（`NEXT_PUBLIC_GOOGLE_CLIENT_ID` を埋め込んでビルド → SWA へ配信。`NEXT_PUBLIC_*` は
+ビルド時に静的に埋め込まれる。ローカルは frontend/.env.local に1行）:
+
+```bash
+cd /Users/mitsuru/Desktop/MyDocs/outputs/TV_MVP/frontend
+
+NEXT_PUBLIC_API_BASE_URL="https://ca-tvmvp-api.whiteglacier-fe08d1c0.japaneast.azurecontainerapps.io" \
+NEXT_PUBLIC_GOOGLE_CLIENT_ID="1079731061136-b4qeaf52n55ukqhop8ft3khg6pmf67a2.apps.googleusercontent.com" \
+  npx next build
+
+TOKEN=$(az staticwebapp secrets list -g rg-001-gen12 -n swa-tvmvp-73bb \
+  --query properties.apiKey -o tsv)
+npx --yes @azure/static-web-apps-cli deploy ./out \
+  --deployment-token "$TOKEN" --env production
+```
+
+ローカルで Google を有効化して動かす場合（backend/.env と frontend/.env.local に各1行。ユーザーが実行）:
+
+```bash
+echo 'GOOGLE_CLIENT_ID=1079731061136-b4qeaf52n55ukqhop8ft3khg6pmf67a2.apps.googleusercontent.com' >> backend/.env
+echo 'NEXT_PUBLIC_GOOGLE_CLIENT_ID=1079731061136-b4qeaf52n55ukqhop8ft3khg6pmf67a2.apps.googleusercontent.com' >> frontend/.env.local
+```
+
+確認:
+- frontend を開くと家族側にサインイン画面が出て、**Google の公式サインインボタン**が表示される。
+  ボタンからサインインすると ID トークンが sessionStorage に保持され、以降の API 呼び出しは
+  その Bearer で通る。別 Google アカウントでサインインすると別家族に分離される。
+- 無トークンの API 呼び出しは 401。dev トークン（`dev-fixed-token`）は併存で 200（本番前に無効化）。
+- 無効化に戻すには両環境変数を空にして配信し直す
+  （例: `az containerapp update -g rg-001-gen12 -n ca-tvmvp-api --set-env-vars "GOOGLE_CLIENT_ID="`）。
+
+**(B) Entra ID（家族側ログイン）の有効化（クライアントID到着後・2026-07-06）**
+
+家族側ログインは Entra ID 本実装済み（個人 Microsoft アカウント対応・SPA/PKCE）。
+ただしアプリ登録の作成は管理者待ちのため、**クライアントID を後から環境変数で注入する
+二段構え**にしてある。
+
+- 未設定（現状）: backend `ENTRA_CLIENT_ID` 空・frontend `NEXT_PUBLIC_ENTRA_CLIENT_ID` 空。
+  → ログイン UI は出ず、家族側は開発用固定トークン（`DEV_FAMILY_TOKEN`）のみで動作する
+  （既存の pytest / Playwright / デモは無変更で通る）。
+- 設定後（有効化）: 家族側は「Microsoft でサインイン」画面 → ログインして利用。
+  初回ログイン時にその auth_id 用の家族＋owner ユーザーが自動作成される。
+  開発用固定トークンは併存（テスト家族限定の裏口。本番前に無効化する）。
+
+前提: 管理者が Entra でアプリ登録を作成し、次を満たすこと。
+- サインインできるアカウントの種類 = **個人 Microsoft アカウントを含む任意の組織ディレクトリ**
+  （`AzureADandPersonalMicrosoftAccount`）。
+- プラットフォーム = **SPA（PKCE）**。リダイレクト URI に各環境のオリジンを登録:
+  `http://localhost:3000`（ローカル）と SWA の URL（本番）。
+- 「API の公開」で **アプリ ID URI = `api://<CLIENT_ID>`**、スコープ **`access_as_user`** を追加。
+  そのスコープをこの SPA クライアント自身に事前同意（Authorized client applications）しておく。
+
+到着したクライアントID（アプリケーション（クライアント）ID）を `CLIENT_ID` として使う。
+
+**(1) backend を有効化（`ENTRA_CLIENT_ID` を設定して再起動）**
+
+ローカル:
+
+```bash
+cd /Users/mitsuru/Desktop/MyDocs/outputs/TV_MVP/backend
+echo 'ENTRA_CLIENT_ID=<CLIENT_ID>' >> .env   # 値を注入（クライアントIDは公開値）
+# uvicorn を再起動すると、dev トークン以外の Bearer を Entra トークンとして検証する
+.venv/bin/uvicorn app.main:app --reload --port 8000
+```
+
+クラウド（`ca-tvmvp-api`。イメージ再ビルドは不要＝環境変数のみ更新）:
+
+```bash
+az containerapp update -g rg-001-gen12 -n ca-tvmvp-api \
+  --set-env-vars "ENTRA_CLIENT_ID=<CLIENT_ID>"
+```
+
+**(2) frontend を有効化（`NEXT_PUBLIC_ENTRA_CLIENT_ID` を埋め込んでビルド → SWA へ配信）**
+
+`NEXT_PUBLIC_*` はビルド時に静的に埋め込まれるため、**設定して `next build` し直す**必要がある
+（§13-3 と同じ配信手順。API URL も併せて埋め込む）:
+
+```bash
+cd /Users/mitsuru/Desktop/MyDocs/outputs/TV_MVP/frontend
+
+NEXT_PUBLIC_API_BASE_URL="https://ca-tvmvp-api.whiteglacier-fe08d1c0.japaneast.azurecontainerapps.io" \
+NEXT_PUBLIC_ENTRA_CLIENT_ID="<CLIENT_ID>" \
+  npx next build      # out/ に生成される
+
+TOKEN=$(az staticwebapp secrets list -g rg-001-gen12 -n swa-tvmvp-73bb \
+  --query properties.apiKey -o tsv)
+npx --yes @azure/static-web-apps-cli deploy ./out \
+  --deployment-token "$TOKEN" --env production
+```
+
+ローカルで有効化して動かす場合は `frontend/.env.local` に1行追記して `npm run dev`:
+
+```bash
+echo 'NEXT_PUBLIC_ENTRA_CLIENT_ID=<CLIENT_ID>' >> frontend/.env.local
+```
+
+**(3) 確認**
+
+- frontend を開くと家族側は「Microsoft でサインイン」画面になる。サインイン後、ホームに
+  ユーザー名とログアウトが表示される。以降の API 呼び出しは Entra アクセストークンで通る。
+- 開発用固定トークン（`dev-fixed-token`）も引き続き 200 を返す（併存の裏口）。
+- 無効化に戻すには、両環境変数を空にして（backend は再起動、frontend は再ビルド）配信し直す。
+
+> 無効化（切り戻し）例（クラウド backend）:
+> `az containerapp update -g rg-001-gen12 -n ca-tvmvp-api --set-env-vars "ENTRA_CLIENT_ID="`
 
 ## 停止・クリーンアップ
 

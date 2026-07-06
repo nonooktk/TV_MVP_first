@@ -112,7 +112,9 @@ def test_compute_scores_normalization():
             self.meta_ = {"rms_rise": rms, "face_score": face}
 
     m0, m1, m2 = M(0, 0.5), M(5, 0.5), M(10, 0.5)
-    scores = stage1_scoring.compute_scores([m0, m1, m2])
+    scores, gate_applied = stage1_scoring.compute_scores([m0, m1, m2])
+    # face が全て 0.5（>=閾値）なのでゲート適用可。
+    assert gate_applied is True
     # score = 0.6*rms_norm + 0.4*face
     assert abs(scores[m0.id] - (0.6 * 0.0 + 0.4 * 0.5)) < 1e-9
     assert abs(scores[m1.id] - (0.6 * 0.5 + 0.4 * 0.5)) < 1e-9
@@ -127,38 +129,67 @@ def test_compute_scores_all_same_rms_is_half():
             self.meta_ = {"rms_rise": 7, "face_score": 0.5}
 
     m = M()
-    scores = stage1_scoring.compute_scores([m])
+    scores, gate_applied = stage1_scoring.compute_scores([m])
+    assert gate_applied is True
     assert abs(scores[m.id] - (0.6 * 0.5 + 0.4 * 0.5)) < 1e-9
 
 
-def test_compute_scores_missing_metadata_is_zero():
-    """metadata 欠損は各項 0.0 とみなす（rms は全欠損→同値→0.5）。"""
+def test_compute_scores_missing_metadata_falls_back_to_rms_only():
+    """metadata 全欠損（face 全 0）ではゲートを適用せず音圧のみで採点する。
+
+    不具合2の再発防止: 表情信号が全滅（MediaPipe 停止など）でも候補が全滅せず、
+    rms_rise で順位が付くこと（全欠損→rms 同値→正規化 0.5→score 0.3）。
+    """
     class M:
         def __init__(self):
             self.id = uuid4()
             self.meta_ = {}
 
     a, b = M(), M()
-    scores = stage1_scoring.compute_scores([a, b])
-    # face_score 欠損 → 0.0 なので無表情ゲートで score=0。
-    assert scores[a.id] == 0.0
-    assert scores[b.id] == 0.0
+    scores, gate_applied = stage1_scoring.compute_scores([a, b])
+    # face 全 0 → max<閾値 → ゲート不適用（音圧のみ）。
+    assert gate_applied is False
+    # rms も全欠損（同値）→正規化 0.5 → score = 0.6*0.5 = 0.3。ゲートで潰れない。
+    assert abs(scores[a.id] - 0.3) < 1e-9
+    assert abs(scores[b.id] - 0.3) < 1e-9
 
 
 def test_compute_scores_face_gate():
-    """face_score < 0.1 の候補は score が 0 になる（無表情ゲート）。"""
+    """face_score < 0.1 の候補は score が 0 になる（無表情ゲート・適用可の場合）。"""
     class M:
         def __init__(self, rms, face):
             self.id = uuid4()
             self.meta_ = {"rms_rise": rms, "face_score": face}
 
-    # 高 rms でも face が閾値未満なら 0。
+    # passed の face=0.2 が閾値以上なので候補全体ではゲート適用可。
+    # 高 rms でも gated の face が閾値未満なら 0。
     gated = M(10, 0.05)
     passed = M(0, 0.2)
-    scores = stage1_scoring.compute_scores([gated, passed])
+    scores, gate_applied = stage1_scoring.compute_scores([gated, passed])
+    assert gate_applied is True
     assert scores[gated.id] == 0.0
     assert scores[passed.id] > 0.0
     assert stage1_scoring.FACE_GATE_THRESHOLD == 0.1
+
+
+def test_compute_scores_gate_bypass_when_all_faces_dead():
+    """候補全体の max(face_score) が閾値未満ならゲートを適用せず音圧でランキングする。
+
+    不具合2の中核: 実通話で face_score が全 0 でも、音圧の高い候補が上位に来る
+    （全候補 score=0 で全滅しない）ことを保証する。
+    """
+    class M:
+        def __init__(self, rms, face):
+            self.id = uuid4()
+            self.meta_ = {"rms_rise": rms, "face_score": face}
+
+    lo = M(0, 0.0)   # 音圧最小
+    hi = M(100, 0.0)  # 音圧最大・ただし face は死んでいる
+    scores, gate_applied = stage1_scoring.compute_scores([lo, hi])
+    assert gate_applied is False  # 表情死活 → ゲート不適用
+    # 音圧のみで順位: hi > lo（どちらも 0 ではない）。
+    assert scores[hi.id] > scores[lo.id]
+    assert scores[hi.id] > 0.0
 
 
 def test_run_creates_album_and_enqueues_auto_confirm(db):

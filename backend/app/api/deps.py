@@ -1,22 +1,40 @@
 """FastAPI の共通依存（認証2系統・サービスDI）。
 
-- 家族認証（`require_family`）: Authorization: Bearer が settings.DEV_FAMILY_TOKEN と一致すれば
-  シード済みの owner ユーザーへ解決する（スタブ。将来 Entra に差し替え可能な形）。
+- 家族認証（`require_family`）: Authorization: Bearer を次の多段構えで解決する。
+  1. トークンが settings.DEV_FAMILY_TOKEN と一致 → シード済み owner へ解決（開発用の裏口）。
+  2. 不一致 → JWT の iss を「未検証デコード」で覗き、発行者に応じて検証器へ振り分ける:
+     - Google（iss=accounts.google.com 系）→ settings.GOOGLE_CLIENT_ID が非空なら
+       app.core.google で ID トークンを検証（主体キー=`google:{sub}`）。
+     - それ以外（Entra 想定）→ settings.ENTRA_CLIENT_ID が非空なら app.core.entra で
+       v2.0 アクセストークンを検証（主体キー=`entra:{oid|sub}`）。
+     該当プロバイダが未設定（クライアントID 空）なら 401。
+  検証成功なら auth_id（プレフィックス付き）で users を解決し、無ければ家族＋owner を
+  自動プロビジョニングする（Google/Entra 共用）。
+  両プロバイダとも未設定なら、dev トークン以外の Bearer はすべて 401。
 - デバイス認証（`require_device`）: X-Device-Token を sha256 して devices.device_token_hash と
   照合する（status=active のみ通す）。こちらは本実装。
+
+**auth_id のプレフィックス方式**: 家族ユーザーの users.auth_id はプロバイダ接頭辞を付ける
+（Google=`google:{sub}`・Entra=`entra:{oid}`）。プロバイダをまたいだ主体キーの衝突を防ぎ、
+どのプロバイダ由来かを構造で判別できるようにする。実ユーザー未登場のため既存データの移行は不要。
 
 Blob/Queue/Agora/Speech の各サービスは、テスト時に差し替えられるよう依存として供給する。
 """
 
 from __future__ import annotations
 
+import logging
+
+import jwt
 from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
+from app.core.entra import EntraTokenError, verify_entra_token
+from app.core.google import GoogleTokenError, verify_google_token
 from app.core.security import sha256_hex
-from app.db.models import Device, User
+from app.db.models import Device, Family, User
 from app.db.session import get_db
 from app.services.agora import (
     AgoraTokenProvider,
@@ -31,33 +49,17 @@ from app.services.speech import (
     SpeechTokenProvider,
 )
 
+logger = logging.getLogger(__name__)
+
 
 # --- 認証 ---------------------------------------------------------------------
 
 
-def require_family(
-    authorization: str | None = Header(default=None),
-    db: Session = Depends(get_db),
-    settings: Settings = Depends(get_settings),
-) -> User:
-    """家族認証（Bearer スタブ）。owner ユーザーへ解決する。
+def _resolve_dev_family_owner(db: Session) -> User:
+    """開発用固定トークンの解決先（シード済み owner）を返す。
 
-    Authorization: Bearer <token> が settings.DEV_FAMILY_TOKEN と一致することを確認し、
-    シード済みの owner ユーザーを返す。将来はここを Entra 検証に差し替える。
+    従来のスタブ挙動。owner が未シードなら 401。
     """
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"code": "unauthorized", "message": "Bearer トークンが必要です"},
-        )
-    token = authorization.split(" ", 1)[1].strip()
-    if token != settings.DEV_FAMILY_TOKEN:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"code": "unauthorized", "message": "トークンが無効です"},
-        )
-
-    # スタブでは owner ユーザー（シード済み）へ解決する。
     user = db.scalars(
         select(User).where(User.role == "owner").order_by(User.created_at)
     ).first()
@@ -70,6 +72,127 @@ def require_family(
             },
         )
     return user
+
+
+def _provision_or_get_by_auth_id(
+    db: Session, auth_id: str, name: str | None
+) -> User:
+    """主体（auth_id＝プレフィックス付き）に対応する家族側ユーザーを返す（Google/Entra 共用）。
+
+    - auth_id で users を検索して見つかればそのユーザーを返す（既存家族に解決）。
+    - 見つからなければ、その auth_id 用の家族（families）＋ owner ユーザー（users）を
+      新規作成して返す（初回ログイン時の自動プロビジョニング）。以後はその family に解決され、
+      既存の家族スコープ機構にそのまま乗る。
+
+    auth_id は呼び出し側でプロバイダ接頭辞を付けた値（`google:{sub}` / `entra:{oid}`）を渡す。
+    家族名は「{表示名 または 'わたし'}の家族」。表示名（name）は users に保存する列が
+    無いため（スコープ外）、家族名の生成にのみ使う。
+    """
+    user = db.scalars(select(User).where(User.auth_id == auth_id)).first()
+    if user is not None:
+        return user
+
+    display = name if name else "わたし"
+    family = Family(name=f"{display}の家族")
+    db.add(family)
+    db.flush()
+    user = User(family_id=family.id, role="owner", auth_id=auth_id)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    logger.info(
+        "初回ログイン: 家族と owner を自動作成しました family_id=%s auth_id=%s",
+        family.id,
+        auth_id,
+    )
+    return user
+
+
+def _peek_unverified_issuer(token: str) -> str | None:
+    """JWT を「署名検証せず」デコードして iss（発行者）だけを覗く（振り分け専用）。
+
+    プロバイダ（Google / Entra）を判別するためだけに使う。**ここでの iss は信用しない**
+    ＝実際の検証（署名・aud・iss の厳密判定）は各プロバイダの検証器が行う。JWT として
+    parse できない・iss が無い場合は None を返す（呼び出し側で 401 にする）。
+    """
+    try:
+        payload = jwt.decode(token, options={"verify_signature": False})
+    except Exception:  # noqa: BLE001  # JWT でない・壊れている
+        return None
+    iss = payload.get("iss")
+    return iss if isinstance(iss, str) else None
+
+
+# Google の iss（未検証デコードでの振り分け用。厳密判定は app.core.google が行う）。
+_GOOGLE_ISSUERS = ("accounts.google.com", "https://accounts.google.com")
+
+
+def require_family(
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> User:
+    """家族認証（多段構え: 開発用固定トークン ＋ Google / Entra マルチプロバイダ）。
+
+    1. Bearer が settings.DEV_FAMILY_TOKEN と一致 → シード済み owner を返す（開発用の裏口）。
+    2. 不一致 → JWT の iss を未検証デコードで覗いて発行者を判別し、対応する検証器へ振り分ける:
+       - Google（iss=accounts.google.com 系）: GOOGLE_CLIENT_ID 非空なら ID トークンを検証し、
+         auth_id=`google:{sub}` で users を解決（無ければ家族＋owner を自動作成）。
+       - それ以外（Entra 想定）: ENTRA_CLIENT_ID 非空なら v2.0 アクセストークンを検証し、
+         auth_id=`entra:{oid}` で解決（同上）。
+       該当プロバイダが未設定（クライアントID 空）なら 401。
+    どのプロバイダも設定されていなければ、dev トークン以外の Bearer はすべて 401。
+    """
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "unauthorized", "message": "Bearer トークンが必要です"},
+        )
+    token = authorization.split(" ", 1)[1].strip()
+
+    # 1) 開発用固定トークン（各プロバイダ有効時も併存する裏口）。
+    if token == settings.DEV_FAMILY_TOKEN:
+        return _resolve_dev_family_owner(db)
+
+    # 2) iss（未検証）を見てプロバイダへ振り分ける。iss の厳密判定は各検証器が行う。
+    issuer = _peek_unverified_issuer(token)
+
+    # 2a) Google ID トークン（GOOGLE_CLIENT_ID 設定時のみ）。
+    if issuer in _GOOGLE_ISSUERS:
+        if not settings.GOOGLE_CLIENT_ID:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"code": "unauthorized", "message": "トークンが無効です"},
+            )
+        try:
+            gclaims = verify_google_token(token, settings.GOOGLE_CLIENT_ID)
+        except GoogleTokenError as e:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"code": "unauthorized", "message": "トークンが無効です"},
+            ) from e
+        return _provision_or_get_by_auth_id(
+            db, f"google:{gclaims.sub}", gclaims.name
+        )
+
+    # 2b) Entra ID トークン（ENTRA_CLIENT_ID 設定時のみ。Google 以外の iss を Entra 扱い）。
+    if settings.ENTRA_CLIENT_ID:
+        try:
+            eclaims = verify_entra_token(token, settings.ENTRA_CLIENT_ID)
+        except EntraTokenError as e:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"code": "unauthorized", "message": "トークンが無効です"},
+            ) from e
+        return _provision_or_get_by_auth_id(
+            db, f"entra:{eclaims.auth_id}", eclaims.name
+        )
+
+    # どのプロバイダも未設定で dev トークンでもない → 401。
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail={"code": "unauthorized", "message": "トークンが無効です"},
+    )
 
 
 def require_device(

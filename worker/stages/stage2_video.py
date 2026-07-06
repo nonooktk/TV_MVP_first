@@ -24,6 +24,7 @@ from app.core.paths import album_collage_key, album_video_key, snippet_key
 from app.db.models import Album, Call, Memory
 
 from stages import ffmpeg_render, images
+from stages.call_context import build_call_context
 from stages.labels import get_label_provider
 
 logger = logging.getLogger("worker.stage2")
@@ -111,9 +112,12 @@ def run(db: Session, album_id: str, blob, *, bgm_dir: Path | None = None) -> boo
             photo_paths.append(p)
 
         # 2) タイトル・キャプション（既にユーザー指定があれば上書きしない）。
+        #    確定5枚の metadata（stt_text / stt_labels / trigger_reason）と通話日時から
+        #    「通話文脈」を組み立てて vision ラベリングに渡す（汎用タイトルの回避）。
         call_date = call.started_at or call.created_at or datetime.now(timezone.utc)
+        context = build_call_context(call_date, [m.meta_ or {} for m in ordered])
         labels = get_label_provider().generate(
-            call_date, len(photo_paths), photo_paths=photo_paths
+            call_date, len(photo_paths), photo_paths=photo_paths, context=context
         )
         if not album.title:
             album.title = labels.title

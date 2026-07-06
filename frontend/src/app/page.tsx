@@ -14,6 +14,13 @@ import {
   registerLink,
 } from "../lib/api-client";
 import { syncPendingCalls } from "../modules/sync";
+import FamilyAuthGate from "../components/FamilyAuthGate";
+import { getDisplayName, isEntraEnabled, logout } from "../lib/auth";
+import {
+  googleLogout,
+  isGoogleEnabled,
+  isGoogleSignedIn,
+} from "../lib/googleAuth";
 
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 
@@ -24,6 +31,14 @@ function formatDate(iso: string | null): string {
 }
 
 export default function HomePage() {
+  return (
+    <FamilyAuthGate>
+      <HomePageInner />
+    </FamilyAuthGate>
+  );
+}
+
+function HomePageInner() {
   const router = useRouter();
   const [calling, setCalling] = useState(false);
   const [callError, setCallError] = useState<string | null>(null);
@@ -40,6 +55,45 @@ export default function HomePage() {
   const [linkError, setLinkError] = useState<string | null>(null);
   const [linkLoading, setLinkLoading] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  // サインイン中ユーザーの表示名（ホームに表示＋ログアウト導線）。
+  // Google（GIS）はプロフィール名の取得を省き「サインイン中」を出す、Entra は表示名を出す。
+  const [displayName, setDisplayName] = useState<string | null>(null);
+  // ログアウト導線を出すか（いずれかのプロバイダでサインイン中）。
+  const [signedIn, setSignedIn] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (isGoogleEnabled() && isGoogleSignedIn()) {
+        if (!cancelled) {
+          setSignedIn(true);
+          setDisplayName("サインイン中");
+        }
+        return;
+      }
+      if (isEntraEnabled()) {
+        const name = await getDisplayName();
+        if (!cancelled) {
+          setDisplayName(name);
+          setSignedIn(name !== null);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // ログアウト（プロバイダに応じて破棄）。Google はセッション破棄＋トップ再判定、
+  // Entra は MSAL のサインアウト（リダイレクト）。
+  function handleLogout() {
+    if (isGoogleEnabled() && isGoogleSignedIn()) {
+      googleLogout();
+      window.location.reload(); // ゲートが未サインインを検出しサインイン画面を出す
+      return;
+    }
+    void logout();
+  }
 
   // 残置分（前回の通話終了時に同期しきれなかった IndexedDB メディア）の自動再同期。
   // 控えめに表示する（成功したらアルバム一覧を再取得する）。
@@ -151,6 +205,28 @@ export default function HomePage() {
 
   return (
     <div className="family-shell">
+      {/* いずれかのプロバイダでサインイン中のとき: ユーザー名＋ログアウト（高齢者側には出ない）。 */}
+      {signedIn && displayName && (
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            marginBottom: 12,
+            fontSize: 13,
+            color: "var(--color-text-muted)",
+          }}
+        >
+          <span>{displayName} さん</span>
+          <button
+            className="link-plain"
+            style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13 }}
+            onClick={handleLogout}
+          >
+            ログアウト
+          </button>
+        </div>
+      )}
       <h1 style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>
         元気にしてる？
       </h1>

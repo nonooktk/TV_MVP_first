@@ -12,7 +12,7 @@ import { execFileSync, execSync } from "node:child_process";
 import path from "node:path";
 import { Page, expect, test } from "@playwright/test";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = process.env.E2E_API_BASE ?? "http://localhost:8000";
 const FAMILY_TOKEN = "dev-fixed-token"; // lib/auth-stub.ts の固定トークン
 const DEVICE_TOKEN = "dev-device-token"; // seed.py が毎回この既知値へリセットする
 
@@ -37,10 +37,17 @@ function seedAndGetDeviceId(): string {
  * 本番（Azure）では A1 の担当。ローカル（Azurite）はこのスクリプトで設定する。
  */
 function setBlobCors(): void {
-  execSync(".venv/bin/python scripts/set_blob_cors.py", {
-    cwd: BACKEND_DIR,
-    encoding: "utf-8",
-  });
+  // E2E_BASE_URL で frontend を別ポートに逃がした場合もそのオリジンを許可する。
+  const origins = Array.from(
+    new Set(["http://localhost:3000", process.env.E2E_BASE_URL ?? ""])
+  ).filter(Boolean);
+  execSync(
+    `.venv/bin/python scripts/set_blob_cors.py --origins ${origins.join(" ")}`,
+    {
+      cwd: BACKEND_DIR,
+      encoding: "utf-8",
+    }
+  );
 }
 
 /** worker を --once で1回実行する（キューが空になるまで処理して終了）。 */
@@ -156,15 +163,67 @@ test("M2 フルチェーン: 発火→IndexedDB→同期→候補→選択→動
     `MediaPipe face: loaded=${face?.loaded} failed=${face?.failed} loadMs=${face?.loadMs}`
   );
 
-  // --- forceTrigger（実発火と同経路）を1回 -----------------------------------
-  // buildSnippet が postRoll(3s)+timeslice(1s) 待つため、await 完了まで待つ。
+  // --- 修正1 再現/回帰: 表情検知の health が「loading」で固まらない ------------
+  // フェイクカメラでも映像フレームはあるため、正常なら loading→（no_face|ok）へ遷移する。
+  // 起動タイムアウト（START_TIMEOUT_MS=10s）＋余裕で 15s 以内に loading 以外へ抜ける
+  // ことを assert する。以前は video 再生開始やロードのハングで loading のまま固まった。
+  await pageFamily.waitForFunction(
+    () => (window as any).__detection?.state?.faceHealth !== "loading",
+    undefined,
+    { timeout: 15_000 }
+  );
+  const faceHealth = await pageFamily.evaluate(
+    () => (window as any).__detection?.state?.faceHealth
+  );
+  console.log(`表情検知 health（loading 以外へ遷移）= ${faceHealth}`);
+  // フェイクカメラ（顔なし）では no_face か ok。少なくとも loading/failed ではない
+  // （failed=映像未到達 or ロード失敗＝この環境では起きてはいけない）。
+  expect(["no_face", "ok"]).toContain(faceHealth);
+
+  // --- 修正1 回帰: 2回連続 forceTrigger（4秒空けて）→ 2バースト分が保存される ---
+  // 「1回発火後に busy が永久化して2回目が動かない」症状の回帰テスト。
+  // 1回目の forceTrigger 完了後に busy が false へ戻り、triggerCount が 1、続く2回目
+  // （4秒後）でも正常発火して triggerCount が 2 になり、IndexedDB に 2 バースト分が入ることを
+  // assert する（onEvent が 2回呼ばれる＝triggerCount で観測）。
+  // forceTrigger は実発火と同経路（handleTrigger）を await 完了まで待つ
+  // （buildSnippet の postRoll(3s)+timeslice(1s) を含む）。
+
+  // 1回目の発火。
   await pageFamily.evaluate(async () => {
     await (window as any).__detection.forceTrigger();
   });
+  // 1回目完了後: busy が解除され triggerCount=1（＝永久 busy 化していない）。
+  const afterFirst = await pageFamily.evaluate(() => ({
+    busy: (window as any).__detection?.state?.busy,
+    triggerCount: (window as any).__detection?.state?.triggerCount,
+  }));
+  console.log(
+    `1回目発火後: busy=${afterFirst.busy} triggerCount=${afterFirst.triggerCount}`
+  );
+  expect(afterFirst.busy).toBe(false); // busy 解除（永久化していない）
+  expect(afterFirst.triggerCount).toBe(1);
 
-  // --- IndexedDB に「連写10枚＋look-backコマ」の photo と audio 1件 ----------
-  // 連写(lookback=false)がちょうど10枚、look-back(lookback=true)が1コマ以上含まれることを
-  // 確認する（RFP12 コア②: 連写10枚＋発火前のコマが含まれる）。
+  // 4秒空ける（クールダウン明けを模す。forceTrigger 自体は共有クールダウン非適用だが、
+  // 実運用の連続発火に近づける）。
+  await pageFamily.waitForTimeout(4000);
+
+  // 2回目の発火。
+  await pageFamily.evaluate(async () => {
+    await (window as any).__detection.forceTrigger();
+  });
+  const afterSecond = await pageFamily.evaluate(() => ({
+    busy: (window as any).__detection?.state?.busy,
+    triggerCount: (window as any).__detection?.state?.triggerCount,
+  }));
+  console.log(
+    `2回目発火後: busy=${afterSecond.busy} triggerCount=${afterSecond.triggerCount}`
+  );
+  expect(afterSecond.busy).toBe(false);
+  expect(afterSecond.triggerCount).toBe(2); // 連続発火で triggerCount が増える
+
+  // --- IndexedDB に「2バースト分の連写＋look-backコマ」の photo と audio 2件 ----
+  // 連写(lookback=false)がちょうど20枚（10枚×2発火）、look-back(lookback=true)が2コマ以上
+  // 含まれること（RFP12 コア②: 連写10枚＋発火前のコマ、を2発火ぶん）を確認する。
   const counts = await pageFamily.evaluate(async (cid) => {
     const db: IDBDatabase = await new Promise((resolve, reject) => {
       const req = indexedDB.open("tvmvp-detection", 1);
@@ -190,9 +249,9 @@ test("M2 フルチェーン: 発火→IndexedDB→同期→候補→選択→動
   console.log(
     `IndexedDB: photos=${counts.total}（連写${counts.burst}＋look-back${counts.lookback}） audio=${counts.audio}`
   );
-  expect(counts.burst).toBe(10); // 連写ちょうど10枚
-  expect(counts.lookback).toBeGreaterThanOrEqual(1); // look-back（発火前コマ）を含む
-  expect(counts.audio).toBe(1); // 音声スニペット1件
+  expect(counts.burst).toBe(20); // 連写ちょうど10枚 × 2発火
+  expect(counts.lookback).toBeGreaterThanOrEqual(2); // look-back（発火前コマ）を各発火で含む
+  expect(counts.audio).toBe(2); // 音声スニペット 2件（2発火ぶん）
   const totalPhotos = counts.total;
 
   // --- 家族「通話を終了する」→ 同期完了（__sync.state.done） ------------------
@@ -206,13 +265,13 @@ test("M2 フルチェーン: 発火→IndexedDB→同期→候補→選択→動
     () => (window as any).__sync.state.registeredMemories as number
   );
   console.log(`同期 registeredMemories=${registered}`);
-  expect(registered).toBe(totalPhotos + 1); // 全 photo + audio1
+  expect(registered).toBe(totalPhotos + 2); // 全 photo + audio2（2発火ぶん）
 
   // --- API で memories 作成を確認（candidates 前は album 未作成なので media 側で確認） ---
   // score 実行前に candidates は 404。まず worker score を回す。
   runWorkerOnce();
 
-  // --- candidates が 200・photo 10件 -----------------------------------------
+  // --- candidates が 200・photo 全数（2発火ぶんの連写＋look-back）--------------
   const candRes = await familyApi("GET", `/calls/${callId}/candidates`);
   expect(candRes.status).toBe(200);
   const candList = (await candRes.json()) as {
@@ -223,14 +282,41 @@ test("M2 フルチェーン: 発火→IndexedDB→同期→候補→選択→動
   // photo のみが候補（audio は候補外）。連写＋look-back の総数と一致する。
   expect(candList.candidates.length).toBe(totalPhotos);
 
-  // --- 5枚選択（rank 上位5枚） -----------------------------------------------
-  const selectedIds = candList.candidates.slice(0, 5).map((c) => c.id);
-  const selRes = await familyApi("POST", `/calls/${callId}/selection`, {
-    memory_ids: selectedIds,
+  // --- 5枚選択（選択UI経由: おすすめ一括＋従来タップの入替→確定） --------------
+  // 通話終了後の家族ページは候補ポーリング→ /select へ自動遷移している。
+  // （next.config の output:'export' により trailing slash 付き /select/?call_id= になる）
+  await pageFamily.waitForURL(/\/select\/?\?call_id=/, { timeout: 45_000 });
+
+  // おすすめバッジ（rank 1〜5）が5枚に表示される。
+  await expect(
+    pageFamily.getByTestId("recommended-badge")
+  ).toHaveCount(5, { timeout: 15_000 });
+
+  // 「おすすめの5枚を選ぶ」で rank 1〜5 を一括選択 → 5/5 になる。
+  await pageFamily.getByTestId("select-recommended").click();
+  await expect(pageFamily.getByText("選択 5 / 5 枚")).toBeVisible();
+
+  // 従来どおりタップで入替できる: rank1 を外し（4/5）→ rank6 を追加（5/5）。
+  await pageFamily.locator('img[alt="候補 rank 1"]').click();
+  await expect(pageFamily.getByText("選択 4 / 5 枚")).toBeVisible();
+  await pageFamily.locator('img[alt="候補 rank 6"]').click();
+  await expect(pageFamily.getByText("選択 5 / 5 枚")).toBeVisible();
+
+  // 既存の「これで確定」で確定（POST /calls/{id}/selection は UI が呼ぶ）。
+  await pageFamily.getByRole("button", { name: "これで確定" }).click();
+  await expect(pageFamily.getByText("選択を確定しました")).toBeVisible({
+    timeout: 15_000,
   });
-  expect(selRes.status).toBe(200);
-  const album = (await selRes.json()) as { id: string; status: string };
-  expect(album.status).toBe("generating");
+
+  // album が generating で作成されている。
+  const genRes = await familyApi("GET", "/albums?limit=100");
+  expect(genRes.status).toBe(200);
+  const genAlbums = (await genRes.json()) as {
+    items: Array<{ id: string; call_id: string; status: string }>;
+  };
+  const generating = genAlbums.items.find((a) => a.call_id === callId);
+  expect(generating).toBeDefined();
+  expect(generating!.status).toBe("generating");
 
   // --- worker render → album ready -------------------------------------------
   runWorkerOnce();

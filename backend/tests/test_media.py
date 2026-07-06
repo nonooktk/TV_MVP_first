@@ -60,6 +60,49 @@ def test_media_register_creates_memories_and_enqueues(
     assert updated.ended_at is not None
 
 
+def test_media_register_is_idempotent_after_presented(
+    client, seeded, db, family_headers, fake_queue
+):
+    """提示済み album がある通話への再 register は候補を増やさず score も再投函しない。
+
+    不具合1 の副次原因（同期リトライによる media/register 多重実行で候補が二重に増える）
+    の再発防止。1回目で候補提示→2回目の register は既存 memory_ids を返して 201。
+    """
+    call = _make_call(db, seeded, status="active")
+    item = {
+        "type": "photo",
+        "storage_key": f"families/{seeded['family_id']}/calls/{call.id}/candidates/a.jpg",
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "metadata": {"trigger_reason": "rms"},
+    }
+    payload = {"call_id": str(call.id), "items": [item]}
+
+    # 1回目: 通常登録（memory 1件・score 1件）。
+    res1 = client.post("/media/register", headers=family_headers, json=payload)
+    assert res1.status_code == 201
+    assert len(res1.json()["memory_ids"]) == 1
+    assert len(fake_queue.messages) == 1
+
+    # 候補提示済みを模す（album に presented_at をセット）。
+    album = Album(
+        call_id=call.id,
+        status="awaiting_selection",
+        presented_at=datetime.now(timezone.utc),
+    )
+    db.add(album)
+    db.commit()
+
+    # 2回目: 重複同期。候補を増やさず score も投函しない。
+    res2 = client.post("/media/register", headers=family_headers, json=payload)
+    assert res2.status_code == 201
+    # memory は増えていない（既存1件を返す）。
+    assert len(res2.json()["memory_ids"]) == 1
+    photos = db.query(Memory).filter(Memory.call_id == call.id).count()
+    assert photos == 1
+    # score は再投函されない（1回目の1件のまま）。
+    assert len(fake_queue.messages) == 1
+
+
 def test_upload_sas(client, seeded, db, family_headers):
     """upload-sas が通話プレフィックス配下の書き込みURLを返す。"""
     call = _make_call(db, seeded)

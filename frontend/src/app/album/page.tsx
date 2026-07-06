@@ -28,6 +28,7 @@ import {
 } from "../../lib/api-client";
 import BackHeader from "../../components/BackHeader";
 import ThumbImage from "../../components/ThumbImage";
+import FamilyAuthGate from "../../components/FamilyAuthGate";
 
 const POLL_INTERVAL_MS = 5000; // generating があるときの一覧ポーリング間隔
 
@@ -55,10 +56,13 @@ function groupByDate(items: Album[]): [string, Album[]][] {
 
 export default function AlbumPage() {
   // useSearchParams() は Suspense boundary 配下でのみ使用できるため分離する。
+  // 家族側ページのため FamilyAuthGate でラップ（Entra 有効時は要サインイン）。
   return (
-    <Suspense fallback={<div className="family-shell" />}>
-      <AlbumPageInner />
-    </Suspense>
+    <FamilyAuthGate>
+      <Suspense fallback={<div className="family-shell" />}>
+        <AlbumPageInner />
+      </Suspense>
+    </FamilyAuthGate>
   );
 }
 

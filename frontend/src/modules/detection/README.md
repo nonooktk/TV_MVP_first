@@ -11,7 +11,7 @@
 | --- | --- |
 | `rmsTrigger.ts` | 発火判定の純粋ロジック（クラス）。baseline=緩いEMA(τ=4s)からの相対上昇＋VADゲート＋持続200ms＋クールダウン4s。パラメータは `DEFAULT_RMS_PARAMS` に集約（支給初期値・チューニングは検収対象外） |
 | `audioPipeline.ts` | WebAudio AnalyserNode で rms_dB を約50ms間隔で算出→RmsTrigger へ。並行して MediaRecorder(timeslice=1s)でチャンクをリング保持し、発火時に「先頭チャンク＋発火前2秒〜後3秒」を結合して webm スニペットを構成 |
-| `facePipeline.ts` | `@mediapipe/tasks-vision` FaceLandmarker で face_score（mouthSmile系blendshape中心の0〜1）を約200ms間隔で算出。ロード失敗時は face_score=0 で継続 |
+| `facePipeline.ts` | `@mediapipe/tasks-vision` FaceLandmarker で face_score（mouthSmile系blendshape中心の0〜1）を約200ms間隔で算出。**WASM/モデルは CDN 優先＋ローカル fallback でロード**（本番 SWA の大容量アセット throttle 回避・下節参照）。ロード失敗時は face_score=0 で継続。起動タイムアウト（10s）で `health` を必ず終端（loading で固まらない）し、停止理由を `health().reason` で公開 |
 | `videoRing.ts` | 相手映像を200ms間隔で低解像度canvasに保持（直近3コマ・JPEG）＝映像look-back |
 | `burst.ts` | 発火時に連写10枚（約2秒・200ms間隔・通話解像度）＋look-backコマを収集 |
 | `storage.ts` | IndexedDB 保存（call_id別。photo=Blob+metadata、audio=Blob）。依存は `idb` |
@@ -52,11 +52,24 @@ handle.detach();
 - `lookback` … look-back（発火前バッファ由来）コマか否か
 - `captured_at` … 撮影時刻（ISO 8601 UTC）
 
-## MediaPipe アセットの配信（CDN依存を避けローカル配信）
+## MediaPipe アセットの配信（CDN優先＋ローカル fallback）
 
-WASM とモデル（.task）は `frontend/public/mediapipe/` にコピーしてローカル配信する。
-`facePipeline.ts` は `/mediapipe/wasm`（WASM）・`/mediapipe/models/face_landmarker.task`
-（モデル）を参照する。
+> **2026-07-05 変更**: 当初はローカル配信のみ（CDN依存回避）だったが、本番
+> （Azure Static Web Apps Free）が **9.4MB の WASM・3.7MB のモデルといった大容量静的
+> アセットの配信を ~40〜70KB/s に強く throttle** し、起動タイムアウト（10s）内に
+> ダウンロードできず「⚠️ 表情検知が停止中」になった（dev はディスク即時配信のため成功＝
+> 本番ビルドでのみ再現）。実測: 同一 9.4MB WASM が SWA では 30s で 1〜2MB しか届かず停止
+> する一方、jsDelivr CDN では 1.16s（約8MB/s）で完走する（byte-identical・version pin 済み）。
+> → **`facePipeline.ts` は CDN 優先＋ローカル fallback** に変更した。
+> - WASM:  `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@<pin>/wasm`（1次）→ `/mediapipe/wasm`（fallback）
+> - モデル: Google Storage（float16 公開モデル）（1次）→ `/mediapipe/models/face_landmarker.task`（fallback）
+> - `TASKS_VISION_VERSION` は `package.json` の `@mediapipe/tasks-vision` 版と一致させること。
+> - 表情検知モデルは Google 公開の非PIIファイル。**通話中の顔・音声データは従来どおり
+>   クラウドへ出さない**（CDN 依存は表情検知アセットの取得に限る＝PII 境界は不変）。
+> - ロード成功元は `window.__detection.state.face.source`（`"cdn"|"local"`）で観測できる。
+
+ローカル配信（fallback）用に WASM とモデル（.task）は `frontend/public/mediapipe/` へ
+コピーして置く（オフライン・CDN 障害時の保険）。
 
 **コピー手順（再取得時）:**
 
