@@ -89,3 +89,108 @@ def test_handle_poison_quarantines_to_blob():
 def test_poison_threshold_constant():
     """毒メッセージ閾値は dequeue_count > 5。"""
     assert worker_main.POISON_DEQUEUE_THRESHOLD == 5
+
+
+# --- ポーリングループの削除セマンティクス（不具合1 の再発防止） -----------------
+#
+# 不具合1（実通話のアルバムが作られない）の調査で、ジョブが「消費されたのに成果物なし・
+# 毒ゼロ」なら例外の握りつぶし（失敗時にメッセージを delete している）が最有力仮説だった。
+# 実際には別原因（ユーザーが手動 DELETE）だったが、契約どおりの挙動＝
+# 「成功時のみ delete・失敗時は delete せず再配達に委ねる」を回帰テストで固定する。
+
+
+class _FakeQueue:
+    """receive_one を1回だけ返し、delete 呼び出しを記録するフェイクキュー。"""
+
+    def __init__(self, messages):
+        self._messages = list(messages)
+        self.deleted = []
+
+    def ensure_queue(self):
+        pass
+
+    def receive_one(self):
+        if self._messages:
+            return self._messages.pop(0)
+        return None
+
+    def delete(self, message):
+        self.deleted.append(message.id)
+
+
+class _FakeBlob:
+    def __init__(self):
+        self.uploaded = {}
+
+    def ensure_container(self):
+        pass
+
+    def upload(self, key, data, content_type=None):
+        self.uploaded[key] = data
+
+
+def _run_once(monkeypatch, queue, blob):
+    """_poll_loop(once=True) を、settings/サービス生成を差し替えて実行する。"""
+    monkeypatch.setattr(
+        worker_main, "get_settings",
+        lambda: SimpleNamespace(
+            AZURE_STORAGE_CONNECTION_STRING="x",
+            MEDIA_CONTAINER="media",
+            QUEUE_NAME="pipeline-jobs",
+        ),
+    )
+    monkeypatch.setattr(worker_main, "WorkerBlobService", lambda cs, c: blob)
+    monkeypatch.setattr(worker_main, "WorkerQueueService", lambda cs, q: queue)
+    monkeypatch.setattr(worker_main, "SessionLocal", lambda: SimpleNamespace(close=lambda: None))
+    worker_main._poll_loop(once=True)
+
+
+def test_poll_loop_deletes_on_success(monkeypatch):
+    """処理成功時はメッセージを削除する。"""
+    msg = SimpleNamespace(
+        id="ok1", dequeue_count=1,
+        content=_encode({"job_type": "score", "call_id": "c1"}),
+    )
+    queue = _FakeQueue([msg])
+    monkeypatch.setattr(worker_main, "process_message", lambda *a, **k: None)
+    _run_once(monkeypatch, queue, _FakeBlob())
+    assert queue.deleted == ["ok1"]
+
+
+def test_poll_loop_does_not_delete_on_exception(monkeypatch):
+    """処理失敗（例外）時はメッセージを削除しない（再配達に委ねる）。
+
+    不具合1 の再発防止: 例外を握りつぶして delete すると「消費されたのに成果物なし・
+    毒ゼロ」になる。失敗時に delete が呼ばれないことを固定する。
+    """
+    msg = SimpleNamespace(
+        id="boom1", dequeue_count=1,
+        content=_encode({"job_type": "score", "call_id": "c1"}),
+    )
+    queue = _FakeQueue([msg])
+
+    def _raise(*a, **k):
+        raise RuntimeError("stage1 crashed on bad metadata")
+
+    monkeypatch.setattr(worker_main, "process_message", _raise)
+    _run_once(monkeypatch, queue, _FakeBlob())
+    # 削除されていない → 可視性タイムアウト後に再配達される。
+    assert queue.deleted == []
+
+
+def test_poll_loop_quarantines_and_deletes_poison(monkeypatch):
+    """dequeue_count が閾値超過の毒メッセージは退避して削除する。"""
+    msg = SimpleNamespace(
+        id="poison1", dequeue_count=6,
+        content=_encode({"job_type": "score", "call_id": "c1"}),
+    )
+    queue = _FakeQueue([msg])
+    blob = _FakeBlob()
+    # process_message は呼ばれないはず（毒判定が先）。
+    monkeypatch.setattr(
+        worker_main, "process_message",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("毒は処理しない")),
+    )
+    _run_once(monkeypatch, queue, blob)
+    assert queue.deleted == ["poison1"]
+    assert "system/poison/poison1.json" in blob.uploaded

@@ -69,33 +69,60 @@ def _as_float(value: object) -> float | None:
     return None
 
 
-def compute_scores(memories: list[Memory]) -> dict[UUID, float]:
-    """写真候補群のスコアを算出して {memory_id: score} を返す（純関数・DB非依存）。
+def _gate_is_applicable(face_scores: list[float]) -> bool:
+    """無表情ゲートを適用してよいか判定する（表情信号の死活チェック）。
+
+    候補全体の max(face_score) がゲート閾値未満なら、表情検知が実質死んでいる
+    （MediaPipe ロード失敗・全コマ顔なし等）とみなし、ゲートを適用しない。
+    ゲートを適用すると全候補が 0 点になり、音圧トリガーで拾えた思い出まで全滅する
+    ため、この場合は face を無視して rms_rise（音圧）のみでランキングする。
+
+    - max(face_score) >= FACE_GATE_THRESHOLD: 少なくとも1枚は表情信号があるので適用可。
+    - それ未満: 適用不可（fallback = 音圧のみ）。
+    """
+    if not face_scores:
+        return False
+    return max(face_scores) >= FACE_GATE_THRESHOLD
+
+
+def compute_scores(
+    memories: list[Memory],
+) -> tuple[dict[UUID, float], bool]:
+    """写真候補群のスコアを算出して ({memory_id: score}, gate_applied) を返す。
+
+    純関数・DB非依存。
 
     - rms_rise は候補内 min-max 正規化（全候補同値なら 0.5）。欠損は 0.0 とみなす。
     - face_score は metadata から取得（欠損は 0.0）。
     - score = 0.6 * rms_rise正規化 + 0.4 * face_score。
     - 無表情ゲート: face_score < FACE_GATE_THRESHOLD の候補は score を 0 にする。
+      ただし **候補全体の max(face_score) が閾値未満のときはゲートを適用しない**
+      （表情信号が死活のため。音圧のみでランキングする）。返り値の第2要素
+      gate_applied でどちらだったかを呼び出し側へ伝える（観測用）。
     """
     if not memories:
-        return {}
+        return {}, False
 
     # rms_rise を収集（欠損は 0.0）。
     rms_values: dict[UUID, float] = {}
+    face_by_id: dict[UUID, float] = {}
     for m in memories:
         meta = m.meta_ or {}
         rms = _as_float(meta.get("rms_rise"))
         rms_values[m.id] = rms if rms is not None else 0.0
+        face = _as_float(meta.get("face_score"))
+        face_by_id[m.id] = face if face is not None else 0.0
 
     rms_min = min(rms_values.values())
     rms_max = max(rms_values.values())
     rms_span = rms_max - rms_min
 
+    # ゲート適用可否（候補全体で表情信号が生きているか）。
+    gate_applied = _gate_is_applicable(list(face_by_id.values()))
+
     scores: dict[UUID, float] = {}
     for m in memories:
-        meta = m.meta_ or {}
-        face = _as_float(meta.get("face_score"))
-        face_score = face if face is not None else 0.0
+        face_score = face_by_id[m.id]
 
         # rms_rise 正規化（全候補同値なら 0.5）。
         if rms_span == 0:
@@ -105,13 +132,13 @@ def compute_scores(memories: list[Memory]) -> dict[UUID, float]:
 
         score = _W_RMS * rms_norm + _W_FACE * face_score
 
-        # 無表情ゲート: 閾値未満なら 0 にする。
-        if face_score < FACE_GATE_THRESHOLD:
+        # 無表情ゲート: 閾値未満なら 0 にする（ただしゲート適用可のときのみ）。
+        if gate_applied and face_score < FACE_GATE_THRESHOLD:
             score = 0.0
 
         scores[m.id] = score
 
-    return scores
+    return scores, gate_applied
 
 
 def run(db: Session, call_id: str, queue, blob=None) -> str | None:
@@ -146,9 +173,23 @@ def run(db: Session, call_id: str, queue, blob=None) -> str | None:
     ).all()
 
     # スコアリング（無表情ゲート含む）。
-    scores = compute_scores(list(photos))
+    scores, gate_applied = compute_scores(list(photos))
     for m in photos:
         m.score = scores.get(m.id)
+
+    # ゲート適用可否を観測できるようにする（表情検知の死活）。
+    # 適用不可＝候補全体で表情信号が閾値未満（MediaPipe 停止の疑い）→ 音圧のみで採点した。
+    if not gate_applied and photos:
+        face_max = max(
+            (_as_float((m.meta_ or {}).get("face_score")) or 0.0) for m in photos
+        )
+        logger.warning(
+            "無表情ゲートを適用せず（表情信号が死活・音圧のみで採点）: "
+            "call=%s 候補=%d max_face_score=%.4f",
+            call_id,
+            len(photos),
+            face_max,
+        )
 
     # 各写真候補のサムネイル（幅320px・JPEG品質70）を生成してアップロードする。
     # 失敗は警告ログでスキップし、候補処理は止めない（軽量化はベストエフォート）。
@@ -177,10 +218,11 @@ def run(db: Session, call_id: str, queue, blob=None) -> str | None:
     delay = _auto_confirm_delay_seconds()
     queue.enqueue_auto_confirm(str(album.id), delay_seconds=delay)
     logger.info(
-        "score 完了: call=%s album=%s 候補=%d 件 auto_confirm=%ds後",
+        "score 完了: call=%s album=%s 候補=%d 件 gate=%s auto_confirm=%ds後",
         call_id,
         album.id,
         len(photos),
+        "applied" if gate_applied else "bypassed(音圧のみ)",
         delay,
     )
     return str(album.id)

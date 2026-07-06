@@ -2,12 +2,69 @@
 // 仕様は docs/api/openapi.yaml に準拠する
 //
 // 認証は2系統:
-// - 家族側: Authorization: Bearer <lib/auth-stub.ts の固定トークン>
+// - 家族側: Authorization: Bearer <トークン>
+//   多段構え（マルチプロバイダ選択式サインイン）:
+//     ・NEXT_PUBLIC_GOOGLE_CLIENT_ID が設定 → Google の ID トークン（lib/googleAuth.ts）を使う。
+//     ・NEXT_PUBLIC_ENTRA_CLIENT_ID が設定 → Entra のアクセストークン（lib/auth.ts）を使う。
+//     ・どちらも未設定 → 従来の dev 固定トークン（lib/auth-stub.ts）。
+//   401 を受けたら（トークン期限切れ ~1h の素朴運用）サインイン画面へ戻す。
 // - 高齢者側（デバイス）: X-Device-Token: <localStorage("device_token")>
 //
 // ベースURLは環境変数 NEXT_PUBLIC_API_BASE_URL（frontend/.env.local）。
 
 import { getAuthToken } from "./auth-stub";
+import { getApiAccessToken, isEntraEnabled } from "./auth";
+import { getGoogleIdToken, isGoogleEnabled } from "./googleAuth";
+
+// 家族側 Bearer に載せるトークンを解決する。
+// 優先順位: Google ID トークン → Entra アクセストークン → dev 固定トークン。
+async function resolveFamilyToken(): Promise<string> {
+  // Google 優先（GIS のボタンでサインイン済みなら sessionStorage にトークンがある）。
+  if (isGoogleEnabled()) {
+    const gtoken = getGoogleIdToken();
+    if (gtoken) return gtoken;
+  }
+  if (isEntraEnabled()) {
+    const token = await getApiAccessToken();
+    // getApiAccessToken は取得失敗時にリダイレクト（対話サインイン）を開始し null を返す。
+    // その場合はページ遷移が起きるため、ここに来ても後続 fetch は事実上実行されない。
+    if (token) return token;
+  }
+  return getAuthToken();
+}
+
+/**
+ * 家族認証が有効か（いずれかのプロバイダが設定されているか）。
+ * 401 受信時に「サインイン画面へ戻すべきか」の判定に使う（dev トークン運用時は戻さない）。
+ */
+function isFamilyAuthEnabled(): boolean {
+  return isGoogleEnabled() || isEntraEnabled();
+}
+
+/**
+ * 家族トークンが 401 で拒否されたときの処理（素朴運用）。
+ * 保持中のサインインを破棄してトップ（＝FamilyAuthGate のサインイン画面）へ戻す。
+ * Google はセッション破棄、Entra は MSAL のサインアウトに任せず単純にトップへ遷移して
+ * ゲートに再判定させる（期限 ~1h の素朴運用）。dev トークン運用時は何もしない。
+ */
+function handleFamilyUnauthorized(): void {
+  if (typeof window === "undefined" || !isFamilyAuthEnabled()) return;
+  // Google のトークンは破棄する（期限切れ ID トークンを持ち続けない）。
+  try {
+    if (isGoogleEnabled()) {
+      window.sessionStorage.removeItem("google_id_token");
+    }
+  } catch {
+    /* noop */
+  }
+  // トップへ戻すとゲートが未サインインを検出しサインイン画面を出す。
+  // 既にトップにいる場合はリロードで再判定させる。
+  if (window.location.pathname === "/") {
+    window.location.reload();
+  } else {
+    window.location.href = "/";
+  }
+}
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -61,7 +118,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   };
 
   if (auth === "family") {
-    headers["Authorization"] = `Bearer ${getAuthToken()}`;
+    headers["Authorization"] = `Bearer ${await resolveFamilyToken()}`;
   } else if (auth === "device") {
     const token = getDeviceToken();
     if (!token) {
@@ -97,6 +154,10 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       parsedBody = json.detail ?? json;
     } catch {
       parsedBody = null;
+    }
+    // 家族認証の 401（トークン期限切れ ~1h の素朴運用）→ サインイン画面へ戻す。
+    if (res.status === 401 && auth === "family") {
+      handleFamilyUnauthorized();
     }
     throw new ApiError(res.status, parsedBody, `APIエラー: ${res.status}`);
   }

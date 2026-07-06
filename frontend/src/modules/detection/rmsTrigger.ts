@@ -29,6 +29,18 @@ export interface RmsTriggerParams {
   sustainMs: number;
   /** 発火後のクールダウン（ms）。3〜5s（初期値4s）。 */
   cooldownMs: number;
+  /**
+   * baseline ウォームアップの時定数 τ（ms・修正4）。
+   * 通話冒頭の有声サンプル累計が warmupMs に達するまでは baselineTauMs ではなくこの速い
+   * τ で順応させ、基準を数秒で平常側へ引き下げる（コールドスタート緩和）。初期値1s。
+   */
+  warmupTauMs: number;
+  /**
+   * ウォームアップを適用する有声サンプルの累計時間（ms・修正4）。
+   * 「最初の有声3秒間だけ τ=warmupTauMs、その後は通常運転 τ=baselineTauMs」を実現する。
+   * 初期値3s。
+   */
+  warmupMs: number;
 }
 
 /**
@@ -39,9 +51,18 @@ export const DEFAULT_RMS_PARAMS: RmsTriggerParams = {
   sampleIntervalMs: 50,
   baselineTauMs: 4000, // τ=4s（3〜5sの中央）
   vadFloorDb: -55, // これ未満は無音（VADゲート・簡易閾値）
-  riseThresholdDb: 8, // baseline比 +8dB で「声を張った」とみなす初期値
-  sustainMs: 200, // 150〜300ms の中央
-  cooldownMs: 4000, // 3〜5s の中央
+  // baseline比 +6dB で「声を張った」とみなす。
+  // 2026-07-05 オーナー実測フィードバックにより +8dB → +6dB（発火が渋いため感度UP）。
+  riseThresholdDb: 6,
+  // 発火に必要な上昇の持続。150〜300ms の下限（発火を出やすくする）。
+  // 2026-07-05 オーナー実測フィードバックにより 200ms → 150ms。
+  sustainMs: 150,
+  cooldownMs: 4000, // 3〜5s の中央（据え置き）
+  // ウォームアップ（修正4）: 最初の有声3秒間だけ τ=1s で速く順応させる。
+  // 通話冒頭にいきなり叫んだケースでも、基準が数秒で平常側へ降りてきて、
+  // 追加の発話で発火できるようにする。以降は τ=baselineTauMs(4s) の通常運転。
+  warmupTauMs: 1000, // ウォームアップ中の速い τ=1s
+  warmupMs: 3000, // 有声サンプル累計3秒までウォームアップ
 };
 
 /** 発火時に外へ渡す情報（metadata の rms_db / rms_rise / trigger_reason の素） */
@@ -63,6 +84,17 @@ export interface RmsTriggerState {
   sustainedMs: number;
   inCooldown: boolean;
   triggerCount: number;
+  /** baseline 比の相対上昇量（dB）。baseline/サンプル未確立は null。デバッグ表示用。 */
+  riseDb: number | null;
+  /** クールダウン残り（ms）。0 なら発火可能。デバッグ表示用。 */
+  cooldownRemainingMs: number;
+  /** 現在の VAD 床（dB）。audioPipeline のノイズフロア推定で動的更新される。デバッグ表示用。 */
+  vadFloorDb: number;
+  /**
+   * baseline ウォームアップ中か（有声サンプル累計が warmupMs 未満＝速い τ で順応中）。
+   * デバッグパネルの warmup 表示用。
+   */
+  inWarmup: boolean;
 }
 
 /**
@@ -84,9 +116,26 @@ export class RmsTrigger {
   private lastTimeMs: number | null = null;
   private lastRmsDb: number | null = null;
   private triggerCount = 0;
+  // 有声サンプルの累計時間（ms・修正4）。warmupMs 未満の間だけ速い τ で順応する。
+  private voicedMs = 0;
 
   constructor(params: Partial<RmsTriggerParams> = {}) {
     this.p = { ...DEFAULT_RMS_PARAMS, ...params };
+  }
+
+  /**
+   * VAD 床（vadFloorDb）を動的に更新する（家族側 VAD 床の自動化・item 12）。
+   *
+   * audioPipeline がノイズフロアを推定し「床＝ノイズ+8dB・[-70,-45] クランプ」を定期反映する。
+   * baseline や persistence など他の内部状態は変えない（床だけを差し替える）。
+   */
+  setVadFloorDb(db: number): void {
+    this.p.vadFloorDb = db;
+  }
+
+  /** 現在の VAD 床（dB）。 */
+  vadFloorDb(): number {
+    return this.p.vadFloorDb;
   }
 
   /**
@@ -112,12 +161,23 @@ export class RmsTrigger {
     // --- baseline（緩いEMA）更新: 有声サンプルのみ -----------------------------
     if (this.baselineDb === null) {
       // 初回の有声サンプルで baseline を確定（立ち上がりで誤発火しないため）。
+      // ※ この「初回有声サンプル=baseline 確定」の挙動はウォームアップ導入後も維持する。
       this.baselineDb = rmsDb;
     } else {
       // EMA: α = dt / τ（τが大きいほど緩やか）。
-      const alpha = Math.min(1, dt / this.p.baselineTauMs);
+      // 【修正4: baseline ウォームアップ】
+      // 有声サンプルの累計（voicedMs）が warmupMs 未満の間は速い τ=warmupTauMs(1s) で
+      // 順応させ、通話冒頭の高い立ち上がり（いきなり叫ぶ等）から基準を数秒で平常側へ
+      // 引き下げる。累計が warmupMs 以上になったら通常運転 τ=baselineTauMs(4s) に戻す。
+      const tau =
+        this.voicedMs < this.p.warmupMs
+          ? this.p.warmupTauMs
+          : this.p.baselineTauMs;
+      const alpha = Math.min(1, dt / tau);
       this.baselineDb = this.baselineDb + alpha * (rmsDb - this.baselineDb);
     }
+    // 有声サンプルの累計を進める（VADゲート通過後のみここに到達する）。
+    this.voicedMs += dt;
 
     const rise = rmsDb - this.baselineDb;
 
@@ -151,12 +211,40 @@ export class RmsTrigger {
 
   /** 観測用の内部状態スナップショット。 */
   snapshot(nowMs: number): RmsTriggerState {
+    const riseDb =
+      this.lastRmsDb !== null && this.baselineDb !== null
+        ? this.lastRmsDb - this.baselineDb
+        : null;
     return {
       baselineDb: this.baselineDb,
       lastRmsDb: this.lastRmsDb,
       sustainedMs: this.sustainedMs,
       inCooldown: nowMs < this.cooldownUntilMs,
       triggerCount: this.triggerCount,
+      riseDb,
+      cooldownRemainingMs: Math.max(0, this.cooldownUntilMs - nowMs),
+      vadFloorDb: this.p.vadFloorDb,
+      inWarmup: this.voicedMs < this.p.warmupMs,
     };
+  }
+
+  /**
+   * その時点の音圧サンプル（rms_db / rms_rise）を返す（コマごと採点用）。
+   *
+   * 連写の各ショット時点でこれを呼び、写真ごとの metadata.rms_db / rms_rise に記録する。
+   * これにより無表情環境（face_score が全0）でも、連写内で音圧の自然な差がつく。
+   *
+   * - rmsDb: 直近サンプルの音圧（dB）。まだサンプルが無ければ null。
+   * - rmsRise: baseline からの相対上昇量（dB）。baseline 未確立なら 0。
+   *
+   * 発火判定（push）とは独立の読み取り専用メソッド（内部状態は変えない）。
+   */
+  sample(): { rmsDb: number | null; rmsRise: number } {
+    const rmsDb = this.lastRmsDb;
+    let rmsRise = 0;
+    if (rmsDb !== null && this.baselineDb !== null) {
+      rmsRise = rmsDb - this.baselineDb;
+    }
+    return { rmsDb, rmsRise };
   }
 }

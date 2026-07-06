@@ -35,13 +35,19 @@ import {
   isPermissionDenied,
   startCall,
   UID_ELDER,
+  type AutoGainDebugState,
 } from "../../modules/call/agoraCall";
 import {
   attachDetection,
   type DetectionEvent,
   type DetectionHandle,
+  type DetectionRuntimeState,
+  type FaceHealthState,
 } from "../../modules/detection";
+import { DEFAULT_RMS_PARAMS } from "../../modules/detection/rmsTrigger";
+import { countByCall } from "../../modules/detection/storage";
 import { syncCallMedia } from "../../modules/sync";
+import FamilyAuthGate from "../../components/FamilyAuthGate";
 
 // 相手退出後の遷移前クッション（ms）
 const AUTO_LEAVE_DELAY_MS = 800;
@@ -51,6 +57,9 @@ const FLASH_MS = 1500;
 const SELECT_POLL_INTERVAL_MS = 3000;
 // /select 候補準備ポーリングの最大待ち（ms）
 const SELECT_POLL_TIMEOUT_MS = 30000;
+// 写真ゼロ通話の通知（「思い出を記録できませんでした」）の表示時間（ms）。
+// 表示中でも画面タップで即ホームへ戻れる。
+const NO_MEMORIES_NOTICE_MS = 3000;
 
 type Phase =
   | "connecting"
@@ -58,13 +67,17 @@ type Phase =
   | "permission_denied"
   | "remote_ended"
   | "syncing"
+  | "no_memories"
   | "error";
 
 export default function CallPage() {
+  // 家族側ページのため FamilyAuthGate でラップ（Entra 有効時は要サインイン）。
   return (
-    <Suspense fallback={<div style={{ minHeight: "100vh", background: "#111" }} />}>
-      <CallPageInner />
-    </Suspense>
+    <FamilyAuthGate>
+      <Suspense fallback={<div style={{ minHeight: "100vh", background: "#111" }} />}>
+        <CallPageInner />
+      </Suspense>
+    </FamilyAuthGate>
   );
 }
 
@@ -81,8 +94,26 @@ function CallPageInner() {
   const [detecting, setDetecting] = useState(false);
   const [memoryCount, setMemoryCount] = useState(0);
   const [flashing, setFlashing] = useState(false);
+  // 表情検知（MediaPipe）の稼働状態。バッジに「顔検知OK/停止中」を小さく出す。
+  const [faceHealth, setFaceHealth] = useState<FaceHealthState>("loading");
+  // 停止（failed）時の理由。バッジに短縮理由を併記し、詳細は title 属性に出す。
+  const [faceReason, setFaceReason] = useState<string | null>(null);
   // 同期の進行表示
   const [syncMessage, setSyncMessage] = useState("思い出を準備中…");
+
+  // デバッグパネル: 画面隅の「デバッグ」ボタンで開閉する。?debug=1 で初期表示ON（後方互換）。
+  const debug = searchParams.get("debug") === "1";
+  const [panelOpen, setPanelOpen] = useState(debug);
+  const [debugState, setDebugState] = useState<DetectionRuntimeState | null>(null);
+  // 自分側（家族・uid=1）マイクの自動ゲイン観測値（window.__autoGainFamily）。
+  const [autoGainFamily, setAutoGainFamily] =
+    useState<AutoGainDebugState | null>(null);
+  // この通話の IndexedDB 保存件数（写真・音声スニペット）。1秒間隔の軽いポーリング。
+  const [dbCounts, setDbCounts] = useState<{ photos: number; audio: number } | null>(
+    null
+  );
+  // 最終キャプチャ（発火イベント）時刻。
+  const [lastCaptureAt, setLastCaptureAt] = useState<Date | null>(null);
 
   const remoteRef = useRef<HTMLDivElement | null>(null);
   const localRef = useRef<HTMLDivElement | null>(null);
@@ -115,9 +146,14 @@ function CallPageInner() {
           callId,
           onEvent: (ev: DetectionEvent) => {
             setMemoryCount((n) => n + ev.photoCount);
+            setLastCaptureAt(new Date());
             setFlashing(true);
             if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
             flashTimerRef.current = setTimeout(() => setFlashing(false), FLASH_MS);
+          },
+          onFaceHealth: (state, reason) => {
+            setFaceHealth(state);
+            setFaceReason(reason);
           },
         });
         setDetecting(true);
@@ -240,9 +276,10 @@ function CallPageInner() {
         return;
       }
     }
-    // 記録が1件も無ければ候補は生成されない。ホームへ戻る。
+    // 記録が1件も無ければ候補は生成されない。
+    // 無言でホームへ戻らず「思い出を記録できませんでした」を数秒表示してから戻る。
     if (registered === 0) {
-      router.push("/");
+      setPhase("no_memories");
       return;
     }
     await waitForCandidatesThenGo();
@@ -254,6 +291,44 @@ function CallPageInner() {
     const t = setTimeout(() => void finishAndSync(), AUTO_LEAVE_DELAY_MS);
     return () => clearTimeout(t);
   }, [phase, finishAndSync]);
+
+  // 写真ゼロ通話の通知 → 3秒表示後にホームへ（タップで即戻れる）。
+  useEffect(() => {
+    if (phase !== "no_memories") return;
+    const t = setTimeout(() => router.push("/"), NO_MEMORIES_NOTICE_MS);
+    return () => clearTimeout(t);
+  }, [phase, router]);
+
+  // デバッグパネル: window.__detection.state と window.__autoGainFamily を 200ms 間隔でポーリング。
+  useEffect(() => {
+    if (!panelOpen) return;
+    const t = setInterval(() => {
+      if (typeof window === "undefined") return;
+      setDebugState(window.__detection?.state ?? null);
+      setAutoGainFamily(window.__autoGainFamily ?? null);
+    }, 200);
+    return () => clearInterval(t);
+  }, [panelOpen]);
+
+  // デバッグパネル: この通話の IndexedDB 件数（写真/音声）を1秒間隔で軽くポーリング。
+  useEffect(() => {
+    if (!panelOpen || !callId) return;
+    let cancelled = false;
+    const tick = async (): Promise<void> => {
+      try {
+        const counts = await countByCall(callId);
+        if (!cancelled) setDbCounts(counts);
+      } catch {
+        // IndexedDB 未初期化などは無視（次回ポーリングで再試行）
+      }
+    };
+    void tick();
+    const t = setInterval(() => void tick(), 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [panelOpen, callId]);
 
   // 「通話を終了する」
   const handleEnd = useCallback(() => {
@@ -320,6 +395,36 @@ function CallPageInner() {
         >
           {flashing ? "● 記録中！" : detecting ? "● AI記録中" : "○ AI準備中"}
         </div>
+        {/* 表情検知（MediaPipe）の稼働状態。ユーザーが不調に気づけるように小さく出す。 */}
+        {detecting && (
+          <div
+            style={{
+              background:
+                faceHealth === "ok"
+                  ? "rgba(0,0,0,0.55)"
+                  : faceHealth === "failed"
+                  ? "rgba(200,60,60,0.75)"
+                  : "rgba(0,0,0,0.45)",
+              padding: "2px 9px",
+              borderRadius: 999,
+              fontSize: 11,
+              color: faceHealth === "ok" ? "#cfe" : "#fff",
+            }}
+            title={
+              faceHealth === "failed" && faceReason
+                ? `表情検知が停止中: ${faceReason}`
+                : "表情検知（笑顔スコア）の状態"
+            }
+          >
+            {faceHealth === "ok"
+              ? "😊 顔検知OK"
+              : faceHealth === "no_face"
+              ? "🙂 顔をさがしています"
+              : faceHealth === "loading"
+              ? "⏳ 表情検知を準備中"
+              : `⚠️ 表情検知が停止中${shortFaceReason(faceReason)}`}
+          </div>
+        )}
         {memoryCount > 0 && (
           <div
             style={{
@@ -408,6 +513,25 @@ function CallPageInner() {
         </div>
       )}
 
+      {/* 写真ゼロ通話の通知（3秒表示→自動でホームへ。タップで即戻る） */}
+      {phase === "no_memories" && (
+        <div
+          style={{ ...overlayStyle, cursor: "pointer" }}
+          data-testid="no-memories-notice"
+          onClick={() => router.push("/")}
+        >
+          <div style={{ fontSize: 18, fontWeight: 700 }}>
+            今回の通話では思い出を記録できませんでした
+          </div>
+          <p style={{ maxWidth: 380, fontSize: 13, color: "#bbb" }}>
+            盛り上がった声や「かわいいね」などの言葉で自動記録されます
+          </p>
+          <p style={{ fontSize: 12, color: "#888" }}>
+            まもなくホームへ戻ります（タップですぐ戻る）
+          </p>
+        </div>
+      )}
+
       {/* その他のエラー */}
       {phase === "error" && (
         <div style={overlayStyle}>
@@ -424,8 +548,228 @@ function CallPageInner() {
           </button>
         </div>
       )}
+
+      {/* デバッグボタン（右下隅・控えめ）: パネルを開閉する。?debug=1 で初期表示ON。 */}
+      <button
+        data-testid="debug-toggle"
+        style={debugToggleStyle}
+        onClick={() => setPanelOpen((v) => !v)}
+        title="デバッグパネルを開閉"
+      >
+        デバッグ
+      </button>
+
+      {/* 統合デバッグパネル: 発火・パラメータ・表情・STT・写真・自分側マイクをライブ表示。 */}
+      {panelOpen && (
+        <DebugPanel
+          state={debugState}
+          autoGain={autoGainFamily}
+          dbCounts={dbCounts}
+          lastCaptureAt={lastCaptureAt}
+        />
+      )}
     </div>
   );
+}
+
+// 統合デバッグパネル。画面右下隅に等幅小フォント・半透明背景で、検知・パラメータ・表情・
+// STT・写真（IndexedDB）・自分側マイク autogain をセクション別にライブ表示する。
+// 情報が増えても画面を覆わないよう max-height + スクロール可とする。
+interface DebugPanelProps {
+  state: DetectionRuntimeState | null;
+  /** 自分側（家族・uid=1）マイクの自動ゲイン観測値。 */
+  autoGain: AutoGainDebugState | null;
+  /** この通話の IndexedDB 保存件数（写真・音声スニペット）。 */
+  dbCounts: { photos: number; audio: number } | null;
+  /** 最終キャプチャ（発火イベント）時刻。 */
+  lastCaptureAt: Date | null;
+}
+
+function DebugPanel({ state, autoGain, dbCounts, lastCaptureAt }: DebugPanelProps) {
+  const rms = state?.rms;
+  const stt = state?.stt;
+  const P = DEFAULT_RMS_PARAMS;
+  const fmt = (v: number | null | undefined, d = 1): string =>
+    v === null || v === undefined ? "—" : v.toFixed(d);
+  // STT 直近テキストは末尾30字のみ（パネルを横に広げない）。
+  const sttTail =
+    stt?.lastText && stt.lastText.length > 0
+      ? (stt.lastText.length > 30 ? "…" : "") + stt.lastText.slice(-30)
+      : "—";
+  const sections: Array<[string, Array<[string, string]>]> = [
+    [
+      "発火",
+      [
+        ["rms_dB", fmt(rms?.lastRmsDb)],
+        ["baseline_dB", fmt(rms?.baselineDb)],
+        ["rise", rms?.riseDb == null ? "—" : `+${fmt(rms.riseDb)}dB`],
+        ["sustain", `${Math.round(rms?.sustainedMs ?? 0)}ms`],
+        ["cooldown", `${((rms?.cooldownRemainingMs ?? 0) / 1000).toFixed(1)}s`],
+        ["busy", state?.busy ? "YES" : "no"],
+        ["triggers", String(state?.triggerCount ?? 0)],
+      ],
+    ],
+    [
+      // 調整議論用にパラメータ現在値を明示する（+6dB / 150ms / 4s / 動的 vadFloor / warmup）。
+      "パラメータ現在値",
+      [
+        ["rise_th", `+${P.riseThresholdDb}dB`],
+        ["sustainMs", `${P.sustainMs}ms`],
+        ["cooldownMs", `${(P.cooldownMs / 1000).toFixed(0)}s`],
+        ["vadFloor(動的)", rms?.vadFloorDb == null ? "—" : `${fmt(rms.vadFloorDb)}dB`],
+        [
+          "warmup",
+          rms == null
+            ? "—"
+            : `${rms.inWarmup ? "中" : "済"} (τ${P.warmupTauMs / 1000}s→${
+                P.baselineTauMs / 1000
+              }s/${P.warmupMs / 1000}s)`,
+        ],
+      ],
+    ],
+    [
+      "表情",
+      [
+        [
+          "health",
+          state == null
+            ? "—"
+            : state.faceHealth +
+              (state.faceHealth === "failed" && state.faceReason
+                ? `(${state.faceReason})`
+                : ""),
+        ],
+        ["face_score", fmt(state?.lastFaceScore, 2)],
+        ["source", state?.face.source ?? "—"],
+        ["loadMs", state == null ? "—" : String(Math.round(state.face.loadMs))],
+      ],
+    ],
+    [
+      "STT",
+      [
+        ["enabled", stt?.enabled ? "on" : "off"],
+        ["text", sttTail],
+        ["labelヒット", stt && stt.labelHits.length > 0 ? stt.labelHits.join(",") : "—"],
+        ["stt発火数", String(stt?.triggerCount ?? 0)],
+      ],
+    ],
+    [
+      "写真（この通話）",
+      [
+        ["発火回数", String(state?.triggerCount ?? 0)],
+        ["写真(IndexedDB)", dbCounts == null ? "—" : String(dbCounts.photos)],
+        ["音声スニペット", dbCounts == null ? "—" : String(dbCounts.audio)],
+        [
+          "最終キャプチャ",
+          lastCaptureAt == null ? "—" : lastCaptureAt.toTimeString().slice(0, 8),
+        ],
+      ],
+    ],
+    [
+      "自分側マイク autogain",
+      [
+        [
+          "level",
+          autoGain?.enabled && autoGain.measuredDbfs !== null
+            ? `${autoGain.measuredDbfs.toFixed(1)} dBFS`
+            : "—",
+        ],
+        [
+          "ema",
+          autoGain?.enabled && autoGain.emaDbfs !== null
+            ? `${autoGain.emaDbfs.toFixed(1)} dBFS`
+            : "—",
+        ],
+        ["gain", autoGain?.enabled ? `+${autoGain.gainDb.toFixed(1)} dB` : "—"],
+      ],
+    ],
+  ];
+  return (
+    <div data-testid="debug-panel" style={debugPanelStyle}>
+      <div style={{ color: "#8f8", fontWeight: 700, marginBottom: 4 }}>
+        call debug
+      </div>
+      {state === null && (
+        <div style={{ color: "#aa8", marginBottom: 4 }}>検知未接続…</div>
+      )}
+      {sections.map(([title, rows]) => (
+        <div key={title} style={{ marginBottom: 6 }}>
+          <div style={{ color: "#6d6", fontWeight: 700 }}>{title}</div>
+          <table style={{ borderCollapse: "collapse" }}>
+            <tbody>
+              {rows.map(([k, v]) => (
+                <tr key={k}>
+                  <td style={{ color: "#7c7", paddingRight: 10 }}>{k}</td>
+                  <td
+                    style={{
+                      textAlign: "right",
+                      color:
+                        k === "busy" && v === "YES"
+                          ? "#fd6"
+                          : k === "rise" && v.startsWith("+") && !v.startsWith("+—")
+                          ? "#6f6"
+                          : "#cfc",
+                      overflowWrap: "anywhere",
+                    }}
+                  >
+                    {v}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// デバッグボタン（右下隅・控えめ）。本番公開前に非表示化を判断する（CLAUDE.md 課題）。
+const debugToggleStyle: CSSProperties = {
+  position: "absolute",
+  right: 8,
+  bottom: 8,
+  zIndex: 21,
+  background: "rgba(0,0,0,0.5)",
+  color: "rgba(255,255,255,0.6)",
+  border: "1px solid rgba(255,255,255,0.25)",
+  borderRadius: 6,
+  fontSize: 10,
+  lineHeight: 1.2,
+  padding: "3px 8px",
+  cursor: "pointer",
+};
+
+// 統合デバッグパネル（等幅小フォント・半透明・スクロール可）。
+const debugPanelStyle: CSSProperties = {
+  position: "absolute",
+  right: 8,
+  bottom: 36,
+  zIndex: 20,
+  background: "rgba(0,0,0,0.82)",
+  color: "#0f0",
+  fontFamily:
+    "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Courier New', monospace",
+  fontSize: 11,
+  lineHeight: 1.35,
+  padding: "8px 10px",
+  borderRadius: 8,
+  border: "1px solid rgba(0,255,0,0.35)",
+  minWidth: 200,
+  maxWidth: 280,
+  maxHeight: "min(62vh, 460px)",
+  overflowY: "auto",
+  userSelect: "none",
+};
+
+// 停止（failed）理由 → バッジに併記する短い括弧書き（詳細は title 属性）。
+// reason の文言（facePipeline.ts の failReason）に含まれるキーワードで種別を判定する。
+function shortFaceReason(reason: string | null): string {
+  if (!reason) return "";
+  if (reason.includes("ロード")) return "（読み込み失敗）";
+  if (reason.includes("完了しませんでした")) return "（読み込みタイムアウト）";
+  if (reason.includes("映像フレーム")) return "（映像未到達）";
+  return "";
 }
 
 // 全画面オーバーレイの共通スタイル

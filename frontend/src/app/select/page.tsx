@@ -8,12 +8,18 @@
 // - 候補グリッドは thumb_sas_url（幅320pxサムネ）を表示（未生成時は sas_url へ
 //   フォールバック＝components/ThumbImage）
 // - 確定後はアルバムページへ遷移する（生成中カードが見える。?highlight=<album_id>）
+//
+// 2026-07-06（おすすめ上位5枚）:
+// - rank 1〜5 の候補カードに「おすすめ」バッジを表示
+// - 「おすすめの5枚を選ぶ」ボタンで rank 1〜5 を一括選択状態にする
+//   （その後の入替は従来どおりタップで可能・確定は既存の「これで確定」）
 
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ApiError, Candidate, getCandidates, submitSelection } from "../../lib/api-client";
 import BackHeader from "../../components/BackHeader";
 import ThumbImage from "../../components/ThumbImage";
+import FamilyAuthGate from "../../components/FamilyAuthGate";
 
 const REQUIRED_COUNT = 5;
 
@@ -27,10 +33,13 @@ function formatCountdown(ms: number): string {
 
 export default function SelectPage() {
   // useSearchParams() は Suspense boundary 配下でのみ使用できるため分離する。
+  // 家族側ページのため FamilyAuthGate でラップ（Entra 有効時は要サインイン）。
   return (
-    <Suspense fallback={<div className="family-shell" />}>
-      <SelectPageInner />
-    </Suspense>
+    <FamilyAuthGate>
+      <Suspense fallback={<div className="family-shell" />}>
+        <SelectPageInner />
+      </Suspense>
+    </FamilyAuthGate>
   );
 }
 
@@ -92,6 +101,21 @@ function SelectPageInner() {
     if (!autoConfirmAt) return null;
     return new Date(autoConfirmAt).getTime() - now;
   }, [autoConfirmAt, now]);
+
+  // おすすめ＝rank 1〜5 の候補（rank 昇順）。バッジ表示と一括選択に使う。
+  const recommendedIds = useMemo(
+    () =>
+      [...candidates]
+        .sort((a, b) => a.rank - b.rank)
+        .slice(0, REQUIRED_COUNT)
+        .map((c) => c.id),
+    [candidates]
+  );
+
+  // 「おすすめの5枚を選ぶ」: rank 1〜5 を一括で選択状態にする（既存選択は置き換え）。
+  function selectRecommended() {
+    setSelectedIds(recommendedIds);
+  }
 
   function toggleSelect(id: string) {
     setSelectedIds((prev) => {
@@ -196,6 +220,16 @@ function SelectPageInner() {
                 自動確定まで {formatCountdown(remainingMs)}
               </div>
             )}
+            {recommendedIds.length > 0 && (
+              <button
+                className="btn-secondary"
+                data-testid="select-recommended"
+                style={{ marginTop: 10 }}
+                onClick={selectRecommended}
+              >
+                おすすめの5枚を選ぶ
+              </button>
+            )}
           </div>
 
           <div
@@ -209,6 +243,7 @@ function SelectPageInner() {
             {candidates.map((c) => {
               const order = selectedIds.indexOf(c.id);
               const isSelected = order !== -1;
+              const isRecommended = recommendedIds.includes(c.id);
               return (
                 <div
                   key={c.id}
@@ -245,6 +280,26 @@ function SelectPageInner() {
                     rank {c.rank}
                     {c.score !== null ? ` / score ${c.score.toFixed(2)}` : ""}
                   </div>
+                  {/* おすすめ（rank 1〜5）バッジ: 視認しやすい小ラベル（左下）。 */}
+                  {isRecommended && (
+                    <div
+                      data-testid="recommended-badge"
+                      style={{
+                        position: "absolute",
+                        bottom: 6,
+                        left: 6,
+                        background: "var(--color-primary)",
+                        color: "#fff",
+                        fontSize: 11,
+                        fontWeight: 700,
+                        padding: "2px 8px",
+                        borderRadius: 999,
+                        boxShadow: "0 1px 3px rgba(0,0,0,0.35)",
+                      }}
+                    >
+                      おすすめ
+                    </div>
+                  )}
                   {isSelected && (
                     <div
                       style={{

@@ -22,8 +22,23 @@ class Settings(BaseSettings):
     MEDIA_CONTAINER: str = "media"
     QUEUE_NAME: str = "pipeline-jobs"
 
-    # 家族側の固定 Bearer トークン（スタブ。将来 Entra に差し替え）
+    # 家族側の固定 Bearer トークン（開発用の裏口。Entra 有効時も併存させる）。
+    # テスト家族限定のため、本番前に無効化する（CLAUDE.md 認証節に課題として記録）。
     DEV_FAMILY_TOKEN: str
+
+    # Entra ID（家族側ログイン本実装）。アプリ登録の「アプリケーション（クライアント）ID」。
+    # 空（アプリ登録未作成）なら Entra 検証は行わず、dev トークンのみで動作する（二段構え）。
+    # 非空なら dev トークン以外の Bearer を Entra の v2.0 アクセストークンとして検証する
+    # （app.core.entra.verify_entra_token）。deps.require_family で切替。
+    # aud は `api://{ENTRA_CLIENT_ID}` または `{ENTRA_CLIENT_ID}` を許容する。
+    ENTRA_CLIENT_ID: str = ""
+
+    # Google アカウント認証（家族側ログインのマルチプロバイダ化）。OAuth クライアントID。
+    # 空（未有効化）なら Google 検証は行わない（二段構え。Entra と対称）。
+    # 非空なら iss が Google の Bearer を Google の ID トークンとして検証する
+    # （app.core.google.verify_google_token）。deps.require_family で iss を見て振り分ける。
+    # aud は `{GOOGLE_CLIENT_ID}` に一致することを要求する。公開値（コミット可）。
+    GOOGLE_CLIENT_ID: str = ""
 
     # Agora（A2）。両方が非空なら Real プロバイダ、どちらか欠けたら Fake を使う
     # （deps.get_agora_provider で切替。既存のデモ環境を壊さないため）。

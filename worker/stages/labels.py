@@ -6,9 +6,11 @@
 - タイトル・キャプションは動画に焼き込まない（docs/ffmpeg-commands.md §6）。
   album.title / album.caption としてDBに保存し、閲覧UIがテキスト表示する。
 - 既定は定型フォールバック（FallbackLabelProvider）。
-- vision 版は2実装ある。いずれも選択画像を vision 対応モデルへ渡して情景に応じた
-  短いタイトル・キャプションを日本語で生成し、API 呼び出しが失敗した場合は
-  定型フォールバックへ委譲する（挙動は共通・接続先だけが異なる）。
+- vision 版は2実装ある。いずれも選択画像と**通話文脈**（stages/call_context.py の
+  CallContext。stage2 が確定5枚の metadata から組み立てて渡す）を vision 対応モデルへ
+  渡して、この通話ならではのタイトル・キャプションを日本語で生成し、API 呼び出しが
+  失敗した場合は定型フォールバックへ委譲する（挙動は共通・接続先だけが異なる）。
+  応答は JSON {"title","caption"} を第一とし、失敗時のみ従来形式を緩くパースする。
   - AzureOpenAILabelProvider: Azure OpenAI 版（Regional Standard。本番はこちら）
   - OpenAILabelProvider:      直 OpenAI API 版（MVP 期間中の暫定。支給キーを利用）
 
@@ -28,12 +30,15 @@ Azure 版に必要な環境変数（A1 で worker に設定済み）:
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
+
+from stages.call_context import CallContext, build_call_context, build_prompt
 
 logger = logging.getLogger("worker.labels")
 
@@ -59,8 +64,9 @@ class LabelProvider(Protocol):
         call_date: datetime,
         photo_count: int,
         photo_paths: list[Path] | None = None,
+        context: CallContext | None = None,
     ) -> Labels:
-        """通話日・採用枚数（・任意で画像パス）からタイトル・キャプションを生成する。"""
+        """通話日・採用枚数（・任意で画像パス・通話文脈）からタイトル・キャプションを生成する。"""
         ...
 
 
@@ -69,6 +75,7 @@ class FallbackLabelProvider:
 
     - title:   「YYYY年MM月DD日の思い出」（call の日付）
     - caption: 「{N}枚のベストショット」
+    - 通話文脈（context）は使わない（定型のみ）。
     """
 
     def generate(
@@ -76,6 +83,7 @@ class FallbackLabelProvider:
         call_date: datetime,
         photo_count: int,
         photo_paths: list[Path] | None = None,
+        context: CallContext | None = None,
     ) -> Labels:
         title = f"{call_date.year}年{call_date.month}月{call_date.day}日の思い出"
         caption = f"{photo_count}枚のベストショット"
@@ -91,6 +99,31 @@ def _encode_image(path: Path) -> str | None:
         return None
     b64 = base64.b64encode(data).decode("ascii")
     return f"data:image/jpeg;base64,{b64}"
+
+
+def _parse_labels_json(text: str) -> tuple[str, str] | None:
+    """JSON {"title": "...", "caption": "..."} 形式をパースする。
+
+    コードフェンス（```json ... ```）や前後の説明文が混ざっていても、
+    最初の '{' から最後の '}' までを JSON として読む。
+    パースできない・title が無い場合は None（呼び出し側で緩いパースへフォールバック）。
+    """
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        data = json.loads(text[start : end + 1])
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    title = data.get("title")
+    caption = data.get("caption")
+    if not isinstance(title, str) or not title.strip():
+        return None
+    caption = caption.strip() if isinstance(caption, str) else ""
+    return title.strip(), caption
 
 
 def _parse_labels(text: str) -> tuple[str, str]:
@@ -141,6 +174,7 @@ class _VisionLabelProviderBase:
         call_date: datetime,
         photo_count: int,
         photo_paths: list[Path] | None = None,
+        context: CallContext | None = None,
     ) -> Labels:
         fallback = self._fallback.generate(call_date, photo_count, photo_paths)
         if not photo_paths:
@@ -158,20 +192,11 @@ class _VisionLabelProviderBase:
 
         try:
             client, model = self._create_client()
-            date_str = f"{call_date.year}年{call_date.month}月{call_date.day}日"
-            content: list[dict] = [
-                {
-                    "type": "text",
-                    "text": (
-                        "これは家族のテレビ電話中に自動キャプチャされたベストショットです。"
-                        f"通話日は{date_str}。写真の情景をもとに、"
-                        "動画アルバムの「タイトル」と「キャプション」を日本語で作ってください。"
-                        "タイトルは12文字以内、キャプションは25文字以内。"
-                        "温かく素朴なトーンで。個人名や固有名詞は推測しない。"
-                        "出力は必ず次の形式のみ:\nタイトル: <...>\nキャプション: <...>"
-                    ),
-                }
-            ]
+            # 通話文脈が渡されなければ日時のみの最小文脈を作る（共通ビルダーを常用）。
+            if context is None:
+                context = build_call_context(call_date, [])
+            prompt = build_prompt(context)
+            content: list[dict] = [{"type": "text", "text": prompt}]
             for url in image_urls:
                 content.append(
                     {"type": "image_url", "image_url": {"url": url, "detail": "low"}}
@@ -184,7 +209,11 @@ class _VisionLabelProviderBase:
                 temperature=0.7,
             )
             text = (resp.choices[0].message.content or "").strip()
-            title, caption = _parse_labels(text)
+            # JSON 形式を第一とし、失敗時のみ従来の緩いパースへフォールバック。
+            parsed = _parse_labels_json(text)
+            if parsed is None:
+                parsed = _parse_labels(text)
+            title, caption = parsed
             if not title:
                 return fallback
             return Labels(

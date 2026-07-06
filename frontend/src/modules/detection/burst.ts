@@ -26,12 +26,59 @@ export const DEFAULT_BURST_PARAMS: BurstParams = {
   maxEdge: 0, // 通話解像度のまま
 };
 
+/** その1枚の時点の音圧サンプル（コマごと採点用）。 */
+export interface RmsSample {
+  /** その時点の音圧（dB）。metadata.rms_db に対応。取得できなければ undefined。 */
+  rmsDb?: number;
+  /** その時点の baseline 比上昇（dB）。metadata.rms_rise に対応。 */
+  rmsRise?: number;
+}
+
 /** 連写で撮れた1枚。 */
 export interface BurstPhoto {
   blob: Blob;
   capturedAtMs: number;
   /** look-back（発火前バッファ由来）か否か。metadata.lookback に対応。 */
   lookback: boolean;
+  /**
+   * この1枚を撮った時点の face_score（0〜1）。
+   * sampleFaceScore が渡されたときのみ設定される（コマごと採点）。
+   * look-back コマは撮影が過去のため「発火時点の直近値」を共有する。
+   */
+  faceScore?: number;
+  /**
+   * この1枚を撮った時点の音圧（rms_db / rms_rise）。
+   * sampleRms が渡されたときのみ設定される（コマごと採点）。
+   * look-back コマは撮影が過去のため「発火時点の直近値」を共有する。
+   */
+  rms?: RmsSample;
+}
+
+/** 連写のオプション。 */
+export interface CaptureBurstOptions {
+  /**
+   * 各ショット直後に呼ばれ、その時点の face_score（0〜1）を返す。
+   * これによりコマごとの metadata.face_score を記録できる（発火瞬間の1値共有を廃止）。
+   * 未指定なら faceScore は付かない。
+   */
+  sampleFaceScore?: () => number;
+  /**
+   * look-back コマに付ける face_score（直近値）。sampleFaceScore がある場合のみ使う。
+   * 過去コマは撮り直せないため発火時点の直近値でよい（brief 指定）。
+   */
+  lookbackFaceScore?: number;
+  /**
+   * 各ショット直後に呼ばれ、その時点の音圧（rms_db / rms_rise）を返す。
+   * これによりコマごとの metadata.rms_db / rms_rise を記録できる
+   * （発火瞬間の1値を全コマで共有するのを廃止＝無表情環境でも連写内に差がつく）。
+   * 未指定なら rms は付かない。
+   */
+  sampleRms?: () => RmsSample;
+  /**
+   * look-back コマに付ける音圧（発火時点の直近値）。sampleRms がある場合のみ使う。
+   * 過去コマは撮り直せないため発火時点の直近値を共有する（face_score と同じ扱い）。
+   */
+  lookbackRms?: RmsSample;
 }
 
 /**
@@ -42,14 +89,23 @@ export interface BurstPhoto {
 export async function captureBurst(
   video: HTMLVideoElement,
   lookbackFrames: LookbackFrame[],
-  params: Partial<BurstParams> = {}
+  params: Partial<BurstParams> = {},
+  options: CaptureBurstOptions = {}
 ): Promise<BurstPhoto[]> {
   const p = { ...DEFAULT_BURST_PARAMS, ...params };
   const photos: BurstPhoto[] = [];
+  const { sampleFaceScore, lookbackFaceScore, sampleRms, lookbackRms } = options;
 
   // 1) look-back コマ（発火前）を先頭に入れる。
+  //    過去コマなので face_score / 音圧は発火時点の直近値（lookback*）を共有する。
   for (const f of lookbackFrames) {
-    photos.push({ blob: f.blob, capturedAtMs: f.capturedAtMs, lookback: true });
+    photos.push({
+      blob: f.blob,
+      capturedAtMs: f.capturedAtMs,
+      lookback: true,
+      faceScore: sampleFaceScore ? lookbackFaceScore ?? 0 : undefined,
+      rms: sampleRms ? lookbackRms ?? {} : undefined,
+    });
   }
 
   // 2) 連写用 canvas。
@@ -76,11 +132,16 @@ export async function captureBurst(
     } catch {
       return;
     }
+    // この1枚を撮った瞬間の face_score / 音圧を採点（コマごと採点）。
+    // toBlob は非同期なので、drawImage 直後＝実フレームに最も近いタイミングで採る。
+    const faceScore = sampleFaceScore ? sampleFaceScore() : undefined;
+    const rms = sampleRms ? sampleRms() : undefined;
+
     const blob = await new Promise<Blob | null>((resolve) =>
       canvas.toBlob((b) => resolve(b), "image/jpeg", p.quality)
     );
     if (blob) {
-      photos.push({ blob, capturedAtMs: Date.now(), lookback: false });
+      photos.push({ blob, capturedAtMs: Date.now(), lookback: false, faceScore, rms });
     }
   };
 

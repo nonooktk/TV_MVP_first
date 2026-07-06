@@ -24,7 +24,12 @@ import {
   getLatestAlbum,
   pollIncomingCall,
 } from "../../../lib/api-client";
-import { CallHandle, startCall } from "../../../modules/call/agoraCall";
+import {
+  CallHandle,
+  startCall,
+  type AutoGainDebugState,
+  type CallState,
+} from "../../../modules/call/agoraCall";
 
 const POLL_INTERVAL_MS = 3000;
 
@@ -69,6 +74,28 @@ export default function ElderStandbyPage() {
   useEffect(() => {
     setHasDeviceToken(!!getDeviceToken());
   }, []);
+
+  // デバッグパネル: 通話中の「デバッグ」ボタンで開閉する。?debug=1 で初期表示ON（後方互換）。
+  // 高齢者側の standby は静的エクスポートページなので location.search を直接見る。
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [autoGain, setAutoGain] = useState<AutoGainDebugState | null>(null);
+  // 接続状態（joined / remoteVideo）。agoraCall の観測フック window.__callState から取得。
+  const [connState, setConnState] = useState<CallState | null>(null);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (new URLSearchParams(window.location.search).get("debug") === "1") {
+      setPanelOpen(true);
+    }
+  }, []);
+  useEffect(() => {
+    if (!panelOpen || phase !== "in_call") return;
+    const t = setInterval(() => {
+      if (typeof window === "undefined") return;
+      setAutoGain(window.__autoGain ?? null);
+      setConnState(window.__callState ?? null);
+    }, 200);
+    return () => clearInterval(t);
+  }, [panelOpen, phase]);
 
   const poll = useCallback(async () => {
     try {
@@ -339,6 +366,99 @@ export default function ElderStandbyPage() {
               }}
             >
               {callNotice}
+            </div>
+          )}
+
+          {/* デバッグボタン（左下・自分映像小窓の上・控えめ）: パネルを開閉する。?debug=1 で初期表示ON。 */}
+          <button
+            data-testid="debug-toggle"
+            onClick={() => setPanelOpen((v) => !v)}
+            title="デバッグパネルを開閉"
+            style={{
+              position: "absolute",
+              left: 16,
+              top: 16,
+              zIndex: 23,
+              background: "rgba(0,0,0,0.5)",
+              color: "rgba(255,255,255,0.6)",
+              border: "1px solid rgba(255,255,255,0.25)",
+              borderRadius: 6,
+              fontSize: 10,
+              lineHeight: 1.2,
+              padding: "3px 8px",
+              cursor: "pointer",
+            }}
+          >
+            デバッグ
+          </button>
+
+          {/* デバッグパネル: autogain（level/ema/gain）・接続状態（joined/remote）・デバイス登録状態。
+              等幅小フォント・半透明・スクロール可。 */}
+          {panelOpen && (
+            <div
+              data-testid="autogain-debug"
+              style={{
+                position: "absolute",
+                left: 16,
+                top: 44,
+                zIndex: 22,
+                background: "rgba(0,0,0,0.82)",
+                color: "#0f0",
+                fontFamily:
+                  "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+                fontSize: 11,
+                lineHeight: 1.4,
+                padding: "8px 10px",
+                borderRadius: 8,
+                border: "1px solid rgba(0,255,0,0.35)",
+                minWidth: 170,
+                maxWidth: 260,
+                maxHeight: "min(60vh, 400px)",
+                overflowY: "auto",
+                userSelect: "none",
+              }}
+            >
+              <div style={{ color: "#8f8", fontWeight: 700, marginBottom: 4 }}>
+                elder debug
+              </div>
+              <div style={{ color: "#6d6", fontWeight: 700 }}>autogain</div>
+              {autoGain?.enabled ? (
+                <>
+                  <div>
+                    level:{" "}
+                    {autoGain.measuredDbfs === null
+                      ? "—"
+                      : `${autoGain.measuredDbfs.toFixed(1)} dBFS`}
+                  </div>
+                  <div>
+                    ema:{" "}
+                    {autoGain.emaDbfs === null
+                      ? "—"
+                      : `${autoGain.emaDbfs.toFixed(1)} dBFS`}
+                  </div>
+                  <div style={{ color: "#6f6" }}>
+                    gain: +{autoGain.gainDb.toFixed(1)} dB
+                  </div>
+                </>
+              ) : (
+                <div style={{ color: "#aa8" }}>未接続…</div>
+              )}
+              <div style={{ color: "#6d6", fontWeight: 700, marginTop: 6 }}>
+                接続状態
+              </div>
+              <div>joined: {connState?.joined ? "YES" : "no"}</div>
+              <div>remote: {connState?.remoteVideo ? "YES" : "no"}</div>
+              <div style={{ color: "#6d6", fontWeight: 700, marginTop: 6 }}>
+                デバイス
+              </div>
+              <div>
+                登録:{" "}
+                {hasDeviceToken === null
+                  ? "確認中…"
+                  : hasDeviceToken
+                  ? "登録済み"
+                  : "未登録"}
+              </div>
             </div>
           )}
 

@@ -14,7 +14,9 @@ export default defineConfig({
   workers: 1,
   reporter: [["list"]],
   use: {
-    baseURL: "http://localhost:3000",
+    // ポート衝突時に環境変数で上書きできる（既定は従来どおり 3000。
+    // 各 spec の API_BASE も E2E_API_BASE で上書き可能）。
+    baseURL: process.env.E2E_BASE_URL ?? "http://localhost:3000",
     launchOptions: {
       args: [
         // 偽のカメラ/マイクデバイスを使う（緑ボールのテストパターン映像＋ビープ音声）
