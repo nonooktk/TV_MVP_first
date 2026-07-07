@@ -5,12 +5,17 @@
 // 笑い声や興奮した高い声で上がりやすい。音圧が変わらなくても声色が変われば発火し得る。
 //
 // 設計（承認済み仕様）:
-//   - 入力は発話フレームのスペクトル重心(Hz)。50ms 間隔で算出し push する
-//     （**発話フレームのみ**。非発話時は無視＝呼び出し側でゲートする）。
+//   - 入力は毎フレームのスペクトル重心(Hz)。50ms 間隔で算出し push(centroidHz, isSpeech, nowMs)
+//     を呼ぶ。**発話ゲート成立（isSpeech=true）のフレームのみ**中央値窓・持続カウントの対象。
+//     非発話フレーム（isSpeech=false）は基準を動かさず、**持続カウントをリセット**する
+//     （2026-07-07 実測フィードバック: 無言時の発火排除を厳密化）。
 //   - 基準（平常の重心）は **発話フレームの中央値**（直近 windowMs のローリング窓・改良1と同じ仕組み）。
-//   - 発火条件: 現在の重心が基準比 +riseRatio（+20%）を sustainMs（200ms）持続 → 発火。
-//   - クールダウンは RMS/STT と共有（呼び出し側の handleTrigger 経路の共有クールダウン4秒に委ねる）。
-//     このクラスは重心固有の持続判定までを担い、発火可否イベントを返す（共有クールダウンは上位）。
+//   - 発火条件（2026-07-07 実測フィードバックで厳密化）: 現在の重心が基準比 +riseRatio（+30%）を
+//     sustainMs（200ms）持続 **かつ** 発話ゲート成立 → 発火。
+//   - リアーム: 発火後は「基準比が riseRatio 未満に一度戻る」まで再発火しない（armed=false→true）。
+//   - クールダウンは RMS/STT と共有（呼び出し側の handleTrigger 経路の共有クールダウン8秒に委ねる）。
+//     このクラスは重心固有の持続判定・発話ゲート判定・リアームまでを担い、発火可否イベントを返す
+//     （共有クールダウンは上位）。
 //
 // DOM / WebAudio 非依存の純粋ロジック（vitest で単体テストする）。
 
@@ -22,7 +27,10 @@ export interface CentroidTriggerParams {
   sampleIntervalMs: number;
   /** 基準（発話重心中央値）のローリング窓（ms）。改良1と同じ20秒。 */
   medianWindowMs: number;
-  /** 発火とみなす基準比の上昇率（例 1.2 = +20%）。CENTROID_RISE_RATIO。 */
+  /**
+   * 発火とみなす基準比の上昇率（例 1.3 = +30%）。CENTROID_RISE_RATIO。
+   * 2026-07-07 実測フィードバックにより +20%（1.2）→ +30%（1.3）。
+   */
   riseRatio: number;
   /** 発火に必要な上昇の持続時間（ms）。CENTROID_SUSTAIN_MS。 */
   sustainMs: number;
@@ -35,8 +43,9 @@ export interface CentroidTriggerParams {
 export const DEFAULT_CENTROID_PARAMS: CentroidTriggerParams = {
   sampleIntervalMs: 50,
   medianWindowMs: 20000, // 改良1の発話中央値窓と同じ20秒
-  riseRatio: 1.2, // 基準比 +20%（CENTROID_RISE_RATIO）
-  sustainMs: 200, // +20% を 200ms 持続で発火（CENTROID_SUSTAIN_MS）
+  // 基準比 +30%（CENTROID_RISE_RATIO）。2026-07-07 実測フィードバックにより +20%→+30%。
+  riseRatio: 1.3,
+  sustainMs: 200, // +30% を 200ms 持続で発火（CENTROID_SUSTAIN_MS）
 };
 
 /** 重心発火時に外へ渡す情報（metadata の spectral_centroid / centroid_rise_ratio の素）。 */
@@ -59,14 +68,22 @@ export interface CentroidTriggerState {
   riseRatio: number | null;
   /** 上昇（基準比 ≥ riseRatio）の持続累積（ms）。sustainMs に達すると発火する。 */
   sustainedMs: number;
+  /**
+   * リアーム済み（再発火可能）か（2026-07-07 追加）。
+   * 発火直後は false になり、基準比が riseRatio 未満に一度戻ると true に復帰する。
+   */
+  armed: boolean;
 }
 
 /**
  * スペクトル重心の発火判定器（改良2）。
  *
- * push(centroidHz, nowMs) を **発話フレームのみ** 約50ms間隔で呼ぶ。
- * 基準比が riseRatio 以上を sustainMs 続けたら CentroidTriggerEvent を返す（満たさなければ null）。
- * クールダウンは持たない（上位 handleTrigger の共有クールダウン4秒に委ねる）。
+ * push(centroidHz, isSpeech, nowMs) を毎フレーム（約50ms間隔）呼ぶ。
+ * **発話ゲート成立（isSpeech=true）のフレームのみ**中央値窓・持続カウントの対象とし、
+ * 基準比が riseRatio 以上を sustainMs 続けた**かつ発話ゲート成立**なら CentroidTriggerEvent を
+ * 返す（満たさなければ null）。非発話フレームは基準を動かさず持続カウントをリセットする
+ * （2026-07-07 実測フィードバック: 無言時の発火排除の厳密化）。
+ * クールダウンは持たない（上位 handleTrigger の共有クールダウン8秒に委ねる）。
  */
 export class CentroidTrigger {
   private readonly p: CentroidTriggerParams;
@@ -76,6 +93,9 @@ export class CentroidTrigger {
   private lastTimeMs: number | null = null;
   private baselineHz: number | null = null;
   private sustainedMs = 0;
+  // リアーム済み（再発火可能）か（2026-07-07 追加）。発火直後は false、
+  // 基準比が riseRatio 未満に戻ると true へ復帰する。
+  private armed = true;
 
   constructor(params: Partial<CentroidTriggerParams> = {}) {
     this.p = { ...DEFAULT_CENTROID_PARAMS, ...params };
@@ -83,18 +103,29 @@ export class CentroidTrigger {
   }
 
   /**
-   * 発話フレーム1つ（スペクトル重心 Hz・時刻）を投入する。
-   * 発火条件を満たしたら CentroidTriggerEvent、しなければ null。
+   * フレーム1つ（スペクトル重心 Hz・発話ゲート成立か・時刻）を投入する。
+   * 発火条件（基準比 ≥ riseRatio を sustainMs 持続 **かつ** isSpeech）を満たしたら
+   * CentroidTriggerEvent、しなければ null。
    *
-   * ※ 非発話フレームは呼び出し側で弾く（このメソッドに渡さない）。
+   * @param centroidHz このフレームのスペクトル重心（Hz）
+   * @param isSpeech 発話ゲート成立か（音圧が ノイズフロア+8dB 以上）。
+   *   false（非発話）のフレームは基準（中央値窓）を更新せず、持続カウントをリセットする。
+   * @param nowMs 現在時刻（ms）
    */
-  push(centroidHz: number, nowMs: number): CentroidTriggerEvent | null {
+  push(centroidHz: number, isSpeech: boolean, nowMs: number): CentroidTriggerEvent | null {
     const dt =
       this.lastTimeMs === null
         ? this.p.sampleIntervalMs
         : Math.max(0, Math.min(nowMs - this.lastTimeMs, this.p.sampleIntervalMs * 4));
     this.lastTimeMs = nowMs;
     this.lastCentroidHz = centroidHz;
+
+    // 【発話ゲート不成立（無言）】基準を動かさず、持続カウントをリセットして終える。
+    // 2026-07-07 実測フィードバック: 無言時に発火・持続蓄積が起きないよう厳密化。
+    if (!isSpeech) {
+      this.sustainedMs = 0;
+      return null;
+    }
 
     // 基準（発話重心の中央値）を更新する。
     // 盛り上がり（基準比 ≥ riseRatio）のフレームは窓に入れない
@@ -116,14 +147,26 @@ export class CentroidTrigger {
     }
 
     const ratio = centroidHz / this.baselineHz;
+
+    // 【リアーム（2026-07-07 追加）】比率が riseRatio 未満に戻ったら再発火可能にする。
+    if (ratio < this.p.riseRatio) {
+      this.armed = true;
+    }
+
     if (ratio >= this.p.riseRatio) {
       this.sustainedMs += dt;
     } else {
       this.sustainedMs = 0;
     }
 
+    // リアーム未済（前回発火から比率が閾値未満へ戻っていない）は発火しない。
+    if (!this.armed) {
+      return null;
+    }
+
     if (this.sustainedMs >= this.p.sustainMs) {
       this.sustainedMs = 0;
+      this.armed = false; // リアーム解除: 比率が閾値未満に戻るまで再発火しない
       return {
         centroidHz,
         riseRatio: ratio,
@@ -157,6 +200,7 @@ export class CentroidTrigger {
       baselineHz: this.baselineHz,
       riseRatio,
       sustainedMs: this.sustainedMs,
+      armed: this.armed,
     };
   }
 }

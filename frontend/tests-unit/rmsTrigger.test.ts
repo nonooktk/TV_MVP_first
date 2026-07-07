@@ -1,14 +1,22 @@
 // RmsTrigger（RMS音圧の発火判定・純粋ロジック）の単体テスト（M2）
 //
-// 【baseline の静音区間ベース再設計 2026-07-07 に追随して更新】
+// 【2026-07-07 実測フィードバックによる調整に追随して更新】
+//   - rise 閾値のモード依存化: 仮基準(provisional)=+24dB／発話基準(speech)=+12dB
+//     （旧・一律 riseThresholdDb=+6dB を置換）
+//   - クールダウン 4s→8s
+//   - リアーム条件の追加: 発火後は rise が現行閾値未満に一度戻るまで再発火しない
+//     （クールダウンと AND）
+//
 // 検証観点（指示・docs/detection-params.md 準拠）:
 //   1. 上昇が持続すると発火する / 持続不足では発火しない
 //   2. クールダウン中は発火しない・クールダウン明けで再発火できる
 //   3. 無音（VADゲート未満）では baseline が動かない・発火しない
 //   4. 仮初期値: 初回有声サンプルで baseline = min(サンプル値, -32)
-//   5. 定常区間のみ学習: rise ≥ しきい値の間は EMA を凍結する
+//   5. 定常区間のみ学習: rise ≥ 現行モードのしきい値の間は EMA を凍結する
 //   6. 非対称追従: 下降 τ=2s（速い）／上昇 τ=8s（遅い）
 //   7. シナリオ: 冒頭ギャン泣き即発火→凍結→泣き止み追従→再発火／通常開始回帰／興奮後の静音復帰
+//   8. モード別閾値: provisional=+24dB／speech=+12dB がそれぞれ適用される
+//   9. リアーム: 発火→高止まり中は再発火しない→下がって再度上がると発火する
 
 import { describe, expect, it } from "vitest";
 import {
@@ -39,7 +47,7 @@ function feed(
 }
 
 describe("RmsTrigger", () => {
-  it("baseline を確立したうえで、しきい値超えの上昇が sustain 時間続くと発火する", () => {
+  it("baseline を確立したうえで、しきい値超えの上昇が sustain 時間続くと発火する（仮基準+24dB）", () => {
     const trig = new RmsTrigger();
     let t = 0;
 
@@ -51,14 +59,14 @@ describe("RmsTrigger", () => {
     const base = trig.snapshot(t).baselineDb!;
     expect(base).toBeCloseTo(-40, 0);
 
-    // 声を張る: baseline+6dB 以上（-30dB=+10dB）を sustain(150ms=3サンプル) 以上続ける。
+    // 声を張る: baseline+24dB 以上（仮基準・-14dB=+26dB）を sustain(150ms=3サンプル) 以上続ける。
     let firedTotal = 0;
     for (let i = 0; i < 10; i++) {
-      const ev = trig.push(-30, t);
+      const ev = trig.push(-14, t);
       if (ev) firedTotal += 1;
       t += DT;
     }
-    expect(firedTotal).toBe(1); // クールダウンにより1回だけ発火する
+    expect(firedTotal).toBe(1); // クールダウン＋リアームにより1回だけ発火する
 
     // 発火イベントの中身を確認するため、別インスタンスで単発検証。
     const trig2 = new RmsTrigger();
@@ -67,13 +75,13 @@ describe("RmsTrigger", () => {
     t2 = 120 * DT;
     let ev = null;
     for (let i = 0; i < 6 && !ev; i++) {
-      ev = trig2.push(-30, t2);
+      ev = trig2.push(-14, t2);
       t2 += DT;
     }
     expect(ev).not.toBeNull();
     expect(ev!.reason).toBe("rms");
-    expect(ev!.rmsRise).toBeGreaterThanOrEqual(DEFAULT_RMS_PARAMS.riseThresholdDb);
-    expect(ev!.rmsDb).toBeCloseTo(-30, 0);
+    expect(ev!.rmsRise).toBeGreaterThanOrEqual(DEFAULT_RMS_PARAMS.riseThresholdProvisionalDb);
+    expect(ev!.rmsDb).toBeCloseTo(-14, 0);
   });
 
   it("持続不足（sustain 未満）では発火しない", () => {
@@ -83,10 +91,11 @@ describe("RmsTrigger", () => {
     t = 120 * DT;
 
     // 上昇を sustain(150ms=3サンプル) 未満（2サンプル=100ms）だけ与え、すぐ静音へ戻す。
+    // 仮基準+24dB を超える -14dB を使う。
     let fired = 0;
     for (let cycle = 0; cycle < 5; cycle++) {
       for (let i = 0; i < 2; i++) {
-        const ev = trig.push(-30, t);
+        const ev = trig.push(-14, t);
         if (ev) fired += 1;
         t += DT;
       }
@@ -100,20 +109,21 @@ describe("RmsTrigger", () => {
     expect(fired).toBe(0);
   });
 
-  it("クールダウン中は連続した上昇でも再発火しない", () => {
+  it("クールダウン中（8秒）は連続した上昇でも再発火しない", () => {
     const trig = new RmsTrigger();
     let t = 0;
     feed(trig, -40, 120, 0);
     t = 120 * DT;
 
-    // 大声を長く継続（cooldown=4s=80サンプルより短い60サンプル=3s）。
+    // 大声を長く継続（cooldown=8s=160サンプルより短い120サンプル=6s）。
     let fired = 0;
-    for (let i = 0; i < 60; i++) {
-      const ev = trig.push(-25, t);
+    for (let i = 0; i < 120; i++) {
+      const ev = trig.push(-10, t);
       if (ev) fired += 1;
       t += DT;
     }
-    // 最初の1回のみ発火し、クールダウン(4s)中は再発火しない。
+    // 最初の1回のみ発火し、クールダウン(8s)中は再発火しない
+    //（リアーム未済でもある＝声を張ったままなので二重に抑止される）。
     expect(fired).toBe(1);
   });
 
@@ -126,21 +136,21 @@ describe("RmsTrigger", () => {
     let fired = 0;
     const burst = () => {
       for (let i = 0; i < 8; i++) {
-        const ev = trig.push(-28, t);
+        const ev = trig.push(-10, t);
         if (ev) fired += 1;
         t += DT;
       }
     };
     const silence = (n: number) => {
       for (let i = 0; i < n; i++) {
-        trig.push(-70, t); // VAD未満: baseline 据え置き・持続リセット
+        trig.push(-70, t); // VAD未満: baseline 据え置き・持続リセット・rise 計算対象外
         t += DT;
       }
     };
 
-    burst(); // 1回目の発火（→ cooldown 4s 開始）
-    silence(100); // 5s 静音（cooldown 4s を跨ぐ・baseline は不変）
-    burst(); // 2回目の発火
+    burst(); // 1回目の発火（→ cooldown 8s 開始・armed=false）
+    silence(200); // 10s 静音（cooldown 8s を跨ぐ・baseline は不変）
+    burst(); // 2回目の発火（静音で rise が閾値未満に戻り armed=true 復帰済み）
 
     expect(fired).toBe(2);
   });
@@ -185,10 +195,10 @@ describe("RmsTrigger", () => {
     expect(Math.abs(atBase.rmsRise)).toBeLessThan(1);
 
     // 声を張った直後は rise が正になる（凍結で baseline は据え置かれる）。
-    trig.push(-28, t);
+    trig.push(-14, t);
     const risen = trig.sample();
-    expect(risen.rmsDb).toBeCloseTo(-28, 0);
-    expect(risen.rmsRise).toBeGreaterThan(5);
+    expect(risen.rmsDb).toBeCloseTo(-14, 0);
+    expect(risen.rmsRise).toBeGreaterThan(20);
   });
 
   it("無音を挟んでも直後の大声で誤発火しない（持続がリセットされる）", () => {
@@ -202,7 +212,7 @@ describe("RmsTrigger", () => {
     for (let cycle = 0; cycle < 20; cycle++) {
       trig.push(-70, t);
       t += DT; // 無音
-      const ev = trig.push(-20, t);
+      const ev = trig.push(-10, t);
       if (ev) fired += 1;
       t += DT; // 単発の大声
     }
@@ -217,16 +227,16 @@ describe("RmsTrigger", () => {
     quiet.push(-45, 0);
     expect(quiet.snapshot(DT).baselineDb!).toBeCloseTo(-45, 5);
 
-    // (B) 冒頭が大声（-15dB）→ min(-15,-32) = -32（仮値）を採用。
-    //     これにより rise = -15 -(-32) = +17dB の大きな上昇が冒頭から取れる。
+    // (B) 冒頭が大声（-5dB）→ min(-5,-32) = -32（仮値）を採用。
+    //     これにより rise = -5 -(-32) = +27dB の大きな上昇が冒頭から取れる。
     const loud = new RmsTrigger();
-    loud.push(-15, 0);
+    loud.push(-5, 0);
     expect(loud.snapshot(DT).baselineDb!).toBeCloseTo(-32, 5);
-    expect(loud.sample().rmsRise).toBeCloseTo(17, 0);
+    expect(loud.sample().rmsRise).toBeCloseTo(27, 0);
   });
 
-  it("定常区間のみ学習: rise ≥ しきい値の間は baseline（EMA）が凍結される", () => {
-    // baseline=-40 を確立してから、大声（-25dB＝rise +15dB）を長く流す。
+  it("定常区間のみ学習: rise ≥ 現行モードのしきい値の間は baseline（EMA）が凍結される（仮基準+24dB）", () => {
+    // baseline=-40 を確立してから、大声（-10dB＝rise +30dB）を長く流す。
     // 凍結により baseline はほとんど動かない（発話ピークを平常基準に取り込まない）。
     const trig = new RmsTrigger();
     feed(trig, -40, 120, 0);
@@ -234,8 +244,8 @@ describe("RmsTrigger", () => {
     const baseBefore = trig.snapshot(t).baselineDb!;
 
     for (let i = 0; i < 100; i++) {
-      // 5秒間の大声。rise = +15dB ≥ 6dB のため凍結が続く。
-      trig.push(-25, t);
+      // 5秒間の大声。rise = +30dB ≥ 24dB のため凍結が続く。
+      trig.push(-10, t);
       t += DT;
     }
     const snap = trig.snapshot(t);
@@ -245,9 +255,9 @@ describe("RmsTrigger", () => {
   });
 
   it("非対称追従: 下降 τ=2s は上昇 τ=8s より明確に速い（Phase 1）", () => {
-    // 同じ baseline(-30) から、rise がしきい値未満に収まる小さな段差を与え、
+    // 同じ baseline(-30) から、rise が現行閾値未満に収まる小さな段差を与え、
     // 下降方向（-33へ）と上昇方向（-27へ）で 10 サンプル後の追従量を比較する。
-    // どちらも |rise|=3dB < 6dB なので凍結されず学習が走る。
+    // どちらも |rise|=3dB < 24dB（仮基準閾値）なので凍結されず学習が走る。
     // ※ これは Phase 1（仮基準・非対称 EMA）の性質検証なので、発話累計で Phase 2
     //   （発話基準・改良1）へ切り替わらないよう speechAccumMs=∞ で固定する。
     const P1 = { speechAccumMs: Number.POSITIVE_INFINITY };
@@ -296,11 +306,11 @@ describe("RmsTrigger", () => {
     const trig = new RmsTrigger();
     let t = 0;
 
-    // 冒頭からギャン泣き（-15dB 連続）。初回 min(-15,-32)=-32 の仮基準に対し rise=+17dB。
+    // 冒頭からギャン泣き（-5dB 連続）。初回 min(-5,-32)=-32 の仮基準に対し rise=+27dB(≥24dB)。
     // sustain(150ms) 到達で即発火する。
     let firedEarly = 0;
     for (let i = 0; i < 6; i++) {
-      const ev = trig.push(-15, t);
+      const ev = trig.push(-5, t);
       if (ev) firedEarly += 1;
       t += DT;
     }
@@ -308,17 +318,19 @@ describe("RmsTrigger", () => {
 
     const baseAtCryStart = trig.snapshot(t).baselineDb!;
 
-    // 泣き声（-15dB）が継続。rise=+17dB ≥ 6dB のため凍結が続き、baseline はほぼ上がらない。
-    // クールダウン(4s=80サンプル)を十分に跨ぐ長さ流す。
-    for (let i = 0; i < 120; i++) {
-      trig.push(-15, t);
+    // 泣き声（-5dB）が継続。rise=+27dB ≥ 24dB のため凍結が続き、baseline はほぼ上がらない。
+    // クールダウン(8s=160サンプル)を十分に跨ぐ長さ流す。
+    for (let i = 0; i < 200; i++) {
+      trig.push(-5, t);
       t += DT;
     }
     const snapDuringCry = trig.snapshot(t);
     expect(snapDuringCry.frozen).toBe(true);
-    // 凍結により baseline は泣き声の -15 側へ引き上がらない（据え置き）。
+    // 凍結により baseline は泣き声の -5 側へ引き上がらない（据え置き）。
     expect(Math.abs(snapDuringCry.baselineDb! - baseAtCryStart)).toBeLessThan(0.5);
     expect(snapDuringCry.baselineDb!).toBeLessThan(-25); // まだ平常側にある
+    // リアーム未済（泣き声が高止まりのまま＝rise が閾値未満に戻っていない）。
+    expect(snapDuringCry.armed).toBe(false);
 
     // 泣き止んで普通の声（-32dB前後）に戻る。rise が閾値未満になり凍結解除→下降τ=2sで速やかに追従。
     for (let i = 0; i < 120; i++) {
@@ -327,12 +339,13 @@ describe("RmsTrigger", () => {
     }
     const snapAfter = trig.snapshot(t);
     expect(snapAfter.frozen).toBe(false); // 学習中に戻る
+    expect(snapAfter.armed).toBe(true); // リアーム済みに復帰
     expect(snapAfter.baselineDb!).toBeCloseTo(-32, 0); // 平常 -32 付近まで速やかに追従
 
-    // 再度の大声（-15dB）で発火できる（baseline -32 に対し rise=+17dB）。
+    // 再度の大声（-5dB）で発火できる（baseline -32 に対し rise=+27dB）。
     let firedAgain = 0;
     for (let i = 0; i < 6; i++) {
-      const ev = trig.push(-15, t);
+      const ev = trig.push(-5, t);
       if (ev) firedAgain += 1;
       t += DT;
     }
@@ -349,10 +362,10 @@ describe("RmsTrigger", () => {
     expect(quiet.fired).toBe(0);
     expect(trig.snapshot(t).baselineDb!).toBeCloseTo(-42, 0);
 
-    // 通常発話で声を張る（-30dB＝rise +12dB）を sustain 続けると発火する。
+    // 通常発話で声を張る（-16dB＝rise +26dB ≥ 24dB）を sustain 続けると発火する。
     let fired = 0;
     for (let i = 0; i < 8; i++) {
-      const ev = trig.push(-30, t);
+      const ev = trig.push(-16, t);
       if (ev) fired += 1;
       t += DT;
     }
@@ -372,9 +385,9 @@ describe("RmsTrigger", () => {
     }
     expect(trig.snapshot(t).baselineDb!).toBeCloseTo(-30, 0);
 
-    // 長い興奮: -18dB（rise +12dB）を長く継続 → 凍結で baseline は据え置き。
+    // 長い興奮: -4dB（rise +26dB ≥ 24dB）を長く継続 → 凍結で baseline は据え置き。
     for (let i = 0; i < 160; i++) {
-      trig.push(-18, t);
+      trig.push(-4, t);
       t += DT;
     }
     const afterExcite = trig.snapshot(t);
@@ -457,8 +470,9 @@ describe("RmsTrigger", () => {
 
   it("Phase 2 の基準反映はスルー制限（±1dB/秒）される", () => {
     // speech モードで発話中央値が変わっても、baseline は 1dB/秒までしか動かない。
-    // ここでは rise が閾値（6dB）未満に収まる段差（-40dB＝baseline -45 に対し +5dB）を
-    // 与えて凍結を避け、中央値窓に取り込ませたうえでスルー制限を検証する。
+    // ここでは rise が現行閾値（speech モードは+12dB）未満に収まる段差
+    // （-40dB＝baseline -45 に対し +5dB）を与えて凍結を避け、中央値窓に取り込ませたうえで
+    // スルー制限を検証する。
     const trig = new RmsTrigger({ speechAccumMs: 0 }); // 即 speech モード
     trig.setNoiseFloorDb(-60); // 発話ゲート -52
     let t = 0;
@@ -468,7 +482,7 @@ describe("RmsTrigger", () => {
       t += DT;
     }
     const base0 = trig.snapshot(t).baselineDb!;
-    // -40dB（rise +5dB < 6dB＝凍結しない）を 20 秒（400サンプル）投入。
+    // -40dB（rise +5dB < 12dB＝凍結しない）を 20 秒（400サンプル）投入。
     // median は速やかに -40 側へ寄るが、baseline は 1dB/秒のスルー制限で 5dB 動くのに約5秒かかる。
     // 6 秒（120サンプル）時点では最大 6dB しか動けないため、-40 到達前に制限が効く。
     for (let i = 0; i < 120; i++) {
@@ -485,6 +499,115 @@ describe("RmsTrigger", () => {
       t += DT;
     }
     expect(trig.snapshot(t).baselineDb!).toBeCloseTo(-40, 0);
+  });
+
+  // --- rise 閾値のモード依存化（2026-07-07）-----------------------------------
+
+  it("モード別閾値: provisional モードでは +24dB 未満は発火せず、+24dB 以上で発火する", () => {
+    // 発話累計で speech モードへ切り替わらないよう speechAccumMs=∞ で provisional に固定する。
+    const trig = new RmsTrigger({ speechAccumMs: Number.POSITIVE_INFINITY });
+    let t = 0;
+    feed(trig, -40, 120, 0); // baseline≈-40 を確立（provisional のまま）
+    t = 120 * DT;
+    expect(trig.snapshot(t).mode).toBe("provisional");
+    expect(trig.snapshot(t).riseThresholdDb).toBe(24);
+
+    // +20dB（provisional 閾値未満）では発火しない。
+    let firedUnder = 0;
+    for (let i = 0; i < 8; i++) {
+      const ev = trig.push(-20, t);
+      if (ev) firedUnder += 1;
+      t += DT;
+    }
+    expect(firedUnder).toBe(0);
+
+    // 静音へ戻して持続をリセット。
+    for (let i = 0; i < 6; i++) {
+      trig.push(-42, t);
+      t += DT;
+    }
+
+    // +24dB を明確に超える（-10dB）なら発火する
+    //（直前の -20dB 投入で baseline がわずかに上昇EMA分動くため、余裕を持たせた値を使う）。
+    let firedOver = 0;
+    for (let i = 0; i < 8; i++) {
+      const ev = trig.push(-10, t);
+      if (ev) firedOver += 1;
+      t += DT;
+    }
+    expect(firedOver).toBe(1);
+  });
+
+  it("モード別閾値: speech モードでは +12dB で発火する（provisional なら発火しない上昇幅）", () => {
+    // speech モードへ即切替（speechAccumMs=0）。ノイズフロア設定で発話ゲートを有効化。
+    const trig = new RmsTrigger({ speechAccumMs: 0 });
+    trig.setNoiseFloorDb(-60); // 発話ゲート -52dB
+    let t = 0;
+    // 平常話し声 -35dB を流して baseline を -35 付近に定常化。
+    for (let i = 0; i < 120; i++) {
+      trig.push(-35, t);
+      t += DT;
+    }
+    const snap = trig.snapshot(t);
+    expect(snap.mode).toBe("speech");
+    expect(snap.riseThresholdDb).toBe(12);
+
+    // +15dB（-20dB）は speech 閾値(+12dB)を超えるが provisional 閾値(+24dB)には満たない。
+    // speech モードなら発火する。
+    let fired = 0;
+    for (let i = 0; i < 8; i++) {
+      const ev = trig.push(-20, t);
+      if (ev) fired += 1;
+      t += DT;
+    }
+    expect(fired).toBe(1);
+  });
+
+  // --- リアーム条件（2026-07-07 追加）-----------------------------------------
+
+  it("リアーム: 発火→高止まり中は再発火しない→rise が閾値未満に下がって再度上がると発火する", () => {
+    const trig = new RmsTrigger();
+    let t = 0;
+    feed(trig, -40, 120, 0); // baseline≈-40（provisional・閾値+24dB）
+    t = 120 * DT;
+
+    // 1回目発火（-10dB＝rise+30dB）。
+    let fired1 = 0;
+    for (let i = 0; i < 4; i++) {
+      const ev = trig.push(-10, t);
+      if (ev) fired1 += 1;
+      t += DT;
+    }
+    expect(fired1).toBe(1);
+    expect(trig.snapshot(t).armed).toBe(false);
+
+    // クールダウン(8s)を飛び越えるが、rise が閾値未満に戻っていない（高止まり）ため、
+    // 長時間クールダウンを空けても armed が復帰するまでは再発火しない。
+    for (let i = 0; i < 200; i++) {
+      // 10秒ぶん、声を張ったまま（-10dB のまま高止まり）。
+      trig.push(-10, t);
+      t += DT;
+    }
+    // クールダウン(8s=160サンプル)は明けているが、armed=false のため発火していないはず。
+    expect(trig.snapshot(t).triggerCount).toBe(1); // 増えていない
+    expect(trig.snapshot(t).armed).toBe(false); // rise はまだ閾値以上（高止まり）で未リアーム
+
+    // 静音へ戻す（rise が閾値未満に戻る）→ armed=true に復帰。
+    for (let i = 0; i < 10; i++) {
+      trig.push(-42, t);
+      t += DT;
+    }
+    expect(trig.snapshot(t).armed).toBe(true);
+
+    // 再度上げると発火する（クールダウンも明けている）。
+    let fired2 = 0;
+    for (let i = 0; i < 4; i++) {
+      const ev = trig.push(-10, t);
+      if (ev) fired2 += 1;
+      t += DT;
+    }
+    expect(fired2).toBe(1);
+    expect(trig.snapshot(t).triggerCount).toBe(2);
   });
 });
 
