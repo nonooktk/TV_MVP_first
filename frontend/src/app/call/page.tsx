@@ -45,6 +45,7 @@ import {
   type FaceHealthState,
 } from "../../modules/detection";
 import { DEFAULT_RMS_PARAMS } from "../../modules/detection/rmsTrigger";
+import { DEFAULT_CENTROID_PARAMS } from "../../modules/detection/centroidTrigger";
 import { countByCall } from "../../modules/detection/storage";
 import { syncCallMedia } from "../../modules/sync";
 import FamilyAuthGate from "../../components/FamilyAuthGate";
@@ -94,6 +95,8 @@ function CallPageInner() {
   const [detecting, setDetecting] = useState(false);
   const [memoryCount, setMemoryCount] = useState(0);
   const [flashing, setFlashing] = useState(false);
+  // 記録通知の2段階化（改良3）: started で「記録中…」を表示、completed で解除する。
+  const [recording, setRecording] = useState(false);
   // 表情検知（MediaPipe）の稼働状態。バッジに「顔検知OK/停止中」を小さく出す。
   const [faceHealth, setFaceHealth] = useState<FaceHealthState>("loading");
   // 停止（failed）時の理由。バッジに短縮理由を併記し、詳細は title 属性に出す。
@@ -145,11 +148,18 @@ function CallPageInner() {
           stream,
           callId,
           onEvent: (ev: DetectionEvent) => {
-            setMemoryCount((n) => n + ev.photoCount);
-            setLastCaptureAt(new Date());
-            setFlashing(true);
-            if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
-            flashTimerRef.current = setTimeout(() => setFlashing(false), FLASH_MS);
+            if (ev.type === "started") {
+              // トリガー瞬間（即時）: バッジを即フラッシュし「思い出を記録中…」を出す。
+              setRecording(true);
+              setLastCaptureAt(new Date());
+              setFlashing(true);
+              if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+              flashTimerRef.current = setTimeout(() => setFlashing(false), FLASH_MS);
+            } else {
+              // 保存完了（部分保存でも実枚数）: 記録カウントを更新し「記録中…」を解除する。
+              setMemoryCount((n) => n + ev.photoCount);
+              setRecording(false);
+            }
           },
           onFaceHealth: (state, reason) => {
             setFaceHealth(state);
@@ -381,11 +391,12 @@ function CallPageInner() {
       >
         <div
           style={{
-            background: flashing
-              ? "rgba(74,200,120,0.95)"
-              : detecting
-              ? "rgba(232,115,74,0.9)"
-              : "rgba(120,120,120,0.7)",
+            background:
+              flashing || recording
+                ? "rgba(74,200,120,0.95)"
+                : detecting
+                ? "rgba(232,115,74,0.9)"
+                : "rgba(120,120,120,0.7)",
             padding: "6px 14px",
             borderRadius: 999,
             fontSize: 13,
@@ -393,7 +404,13 @@ function CallPageInner() {
             transition: "background 0.2s",
           }}
         >
-          {flashing ? "● 記録中！" : detecting ? "● AI記録中" : "○ AI準備中"}
+          {recording
+            ? "📸 思い出を記録中…"
+            : flashing
+            ? "● 記録中！"
+            : detecting
+            ? "● AI記録中"
+            : "○ AI準備中"}
         </div>
         {/* 表情検知（MediaPipe）の稼働状態。ユーザーが不調に気づけるように小さく出す。 */}
         {detecting && (
@@ -587,6 +604,7 @@ interface DebugPanelProps {
 
 function DebugPanel({ state, autoGain, dbCounts, lastCaptureAt }: DebugPanelProps) {
   const rms = state?.rms;
+  const centroid = state?.centroid;
   const stt = state?.stt;
   const P = DEFAULT_RMS_PARAMS;
   const fmt = (v: number | null | undefined, d = 1): string =>
@@ -610,7 +628,8 @@ function DebugPanel({ state, autoGain, dbCounts, lastCaptureAt }: DebugPanelProp
       ],
     ],
     [
-      // 調整議論用にパラメータ現在値を明示する（+6dB / 150ms / 4s / 動的 vadFloor / warmup）。
+      // 調整議論用にパラメータ現在値を明示する
+      //（+6dB / 150ms / 4s / 動的 vadFloor / baseline 学習の凍結状態と非対称τ）。
       "パラメータ現在値",
       [
         ["rise_th", `+${P.riseThresholdDb}dB`],
@@ -618,12 +637,65 @@ function DebugPanel({ state, autoGain, dbCounts, lastCaptureAt }: DebugPanelProp
         ["cooldownMs", `${(P.cooldownMs / 1000).toFixed(0)}s`],
         ["vadFloor(動的)", rms?.vadFloorDb == null ? "—" : `${fmt(rms.vadFloorDb)}dB`],
         [
-          "warmup",
+          // baseline 学習の状態（静音区間ベース）: 凍結中か学習中か＋非対称τ（仮初期値 -32）。
+          "baseline学習",
           rms == null
             ? "—"
-            : `${rms.inWarmup ? "中" : "済"} (τ${P.warmupTauMs / 1000}s→${
-                P.baselineTauMs / 1000
-              }s/${P.warmupMs / 1000}s)`,
+            : `${rms.frozen ? "凍結中" : "学習中"} (↑τ${
+                P.baselineTauUpMs / 1000
+              }s/↓τ${P.baselineTauDownMs / 1000}s・仮${P.provisionalBaselineDb}dB)`,
+        ],
+      ],
+    ],
+    [
+      // 基準レベルの2段階化（改良1・発話基準）: 現在モード・発話蓄積秒・発話メジアン。
+      "基準モード（発話基準）",
+      [
+        [
+          "mode",
+          rms == null ? "—" : rms.mode === "speech" ? "発話基準" : "仮基準",
+        ],
+        [
+          "発話蓄積",
+          rms == null
+            ? "—"
+            : `${(rms.speechAccumMs / 1000).toFixed(1)}s / ${(
+                P.speechAccumMs / 1000
+              ).toFixed(0)}s`,
+        ],
+        [
+          "発話メジアン",
+          rms?.speechMedianDb == null ? "—" : `${fmt(rms.speechMedianDb)}dB`,
+        ],
+      ],
+    ],
+    [
+      // スペクトル重心トリガー（改良2）: 現在値/基準/上昇率/持続。
+      "重心（声色）",
+      [
+        [
+          "重心",
+          centroid?.lastCentroidHz == null
+            ? "—"
+            : `${Math.round(centroid.lastCentroidHz)}Hz`,
+        ],
+        [
+          "基準",
+          centroid?.baselineHz == null
+            ? "—"
+            : `${Math.round(centroid.baselineHz)}Hz`,
+        ],
+        [
+          "上昇率",
+          centroid?.riseRatio == null
+            ? "—"
+            : `${centroid.riseRatio.toFixed(2)}x / ${DEFAULT_CENTROID_PARAMS.riseRatio.toFixed(
+                1
+              )}x`,
+        ],
+        [
+          "持続",
+          `${Math.round(centroid?.sustainedMs ?? 0)}ms / ${DEFAULT_CENTROID_PARAMS.sustainMs}ms`,
         ],
       ],
     ],

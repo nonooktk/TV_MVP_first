@@ -24,6 +24,7 @@ import {
   type RmsTriggerEvent,
   type TriggerReason,
 } from "./rmsTrigger";
+import { CentroidTrigger, type CentroidTriggerEvent } from "./centroidTrigger";
 import {
   saveAudio,
   savePhotos,
@@ -66,16 +67,31 @@ export async function raceWithTimeout(
   return result;
 }
 
-/** 発火時に外へ通知するイベント。 */
-export interface DetectionEvent {
-  reason: TriggerReason;
-  /** 保存した写真枚数（連写＋look-back）。 */
-  photoCount: number;
-  /** 音声スニペットを保存できたか。 */
-  hasAudio: boolean;
-  /** 発火時の face_score。 */
-  faceScore: number;
-}
+/**
+ * 記録通知の2段階化（改良3）。
+ *
+ * - "started": **トリガー瞬間**に即時通知する（保存の完了を待たない）。
+ *   UI はこれでバッジをフラッシュし「📸 思い出を記録中…」を出す。
+ * - "completed": 保存完了（またはタイムアウトの部分保存）時に通知する（従来の内容）。
+ *   UI はこれで「思い出を記録しました（N）」へ更新する。記録カウントは completed 基準。
+ *
+ * 8秒タイムアウトの部分保存でも completed の photoCount は実際に保存できた枚数に整合する。
+ */
+export type DetectionEvent =
+  | {
+      type: "started";
+      reason: TriggerReason;
+    }
+  | {
+      type: "completed";
+      reason: TriggerReason;
+      /** 保存した写真枚数（連写＋look-back）。部分保存時も実枚数。 */
+      photoCount: number;
+      /** 音声スニペットを保存できたか。 */
+      hasAudio: boolean;
+      /** 発火時の face_score。 */
+      faceScore: number;
+    };
 
 /** 表情検知の稼働状態（バッジ表示用）。 */
 export type FaceHealthState = "loading" | "failed" | "no_face" | "ok";
@@ -153,8 +169,25 @@ export interface DetectionRuntimeState {
     cooldownRemainingMs: number;
     /** 現在の VAD 床（dB）。audioPipeline のノイズフロア推定で自動更新される（item 12）。 */
     vadFloorDb: number;
-    /** baseline ウォームアップ中か（有声累計 < warmupMs＝速い τ で順応中）。デバッグパネル用。 */
-    inWarmup: boolean;
+    /** baseline 学習が凍結中か（rise ≥ しきい値で盛り上がりを取り込まない）。デバッグパネル用。 */
+    frozen: boolean;
+    /** 基準モード（provisional=仮基準 / speech=発話基準）。改良1。 */
+    mode: "provisional" | "speech";
+    /** 発話（ノイズ+8dB 以上）の累計時間（ms）。5秒で speech モードへ。改良1。 */
+    speechAccumMs: number;
+    /** 発話中央値（直近20秒・dB）。窓が空なら null。改良1。 */
+    speechMedianDb: number | null;
+  };
+  /** スペクトル重心トリガー（改良2）の状態。デバッグパネル用。 */
+  centroid: {
+    /** 直近サンプルのスペクトル重心（Hz）。未サンプルは null。 */
+    lastCentroidHz: number | null;
+    /** 基準重心（発話中央値・Hz）。窓が空なら null。 */
+    baselineHz: number | null;
+    /** 直近の基準比（現在値 / 基準）。算出不能なら null。 */
+    riseRatio: number | null;
+    /** 上昇（基準比 ≥ しきい値）の持続累積（ms）。sustainMs に達すると発火する。 */
+    sustainedMs: number;
   };
   /** STT（感情ワード検知）の状態。STT 無効時は enabled=false。 */
   stt: SttRuntimeState;
@@ -220,6 +253,8 @@ export function attachDetection(opts: AttachDetectionOptions): DetectionHandle {
   }
 
   const rmsTrigger = new RmsTrigger();
+  // スペクトル重心トリガー（改良2）。発話フレームのみ push する（下の onCentroid でゲート）。
+  const centroidTrigger = new CentroidTrigger();
   const videoRing = videoTrack ? new VideoRing(video) : null;
   const facePipeline = videoTrack ? new FacePipeline(video) : null;
   const audioPipeline = audioTrack
@@ -228,40 +263,64 @@ export function attachDetection(opts: AttachDetectionOptions): DetectionHandle {
         (db, now) => onRms(db, now),
         {},
         // 家族側 VAD 床の自動化（item 12）: ノイズフロア推定 → 床=ノイズ+8dB を rmsTrigger へ反映。
-        (vadFloorDb) => rmsTrigger.setVadFloorDb(vadFloorDb)
+        (vadFloorDb) => rmsTrigger.setVadFloorDb(vadFloorDb),
+        // スペクトル重心（改良2）: 発話フレームのみ centroidTrigger へ渡す。
+        (centroidHz, now) => onCentroid(centroidHz, now),
+        // 発話ゲート用のノイズフロア推定（改良1）を rmsTrigger と onCentroid ゲートへ反映する。
+        (noiseFloorDb) => {
+          lastNoiseFloorDb = noiseFloorDb;
+          rmsTrigger.setNoiseFloorDb(noiseFloorDb);
+        }
       )
     : null;
+  // onCentroid の発話ゲートで使う「直近の音圧(dB)」と「ノイズフロア」を保持する。
+  let lastRmsDb: number | null = null;
+  let lastNoiseFloorDb: number | null = null;
 
   let running = true;
   let triggerCount = 0;
   let busy = false; // 発火処理中の再入防止
 
   // --- 発火処理（実発火と forceTrigger の共通経路） --------------------------
-  // reasonOverride を渡すと ev の reason より優先する（STT 発火は ev=null＋"stt"）。
+  // reasonOverride を渡すと ev の reason より優先する（STT 発火は ev=null＋"stt"／
+  // 重心発火は ev=null＋"centroid"＋centroidEv）。
   async function handleTrigger(
     ev: RmsTriggerEvent | null,
-    reasonOverride?: TriggerReason
+    reasonOverride?: TriggerReason,
+    centroidEv?: CentroidTriggerEvent
   ): Promise<void> {
     if (!running || busy) return;
     const triggerAtMs = Date.now();
-    // 共有クールダウン: 直近発火から SHARED_COOLDOWN_MS 未満は抑止（RMS/STT 連打防止）。
+    // 共有クールダウン: 直近発火から SHARED_COOLDOWN_MS 未満は抑止（RMS/STT/重心 連打防止）。
     // forceTrigger（テスト）は reasonOverride=undefined & ev=null で来るため抑止しない。
-    const isSttOrRms = reasonOverride === "stt" || ev !== null;
+    const isSttOrRmsOrCentroid =
+      reasonOverride === "stt" || reasonOverride === "centroid" || ev !== null;
     if (
-      isSttOrRms &&
+      isSttOrRmsOrCentroid &&
       !passesSharedCooldown(triggerAtMs, lastTriggerAtMs, SHARED_COOLDOWN_MS)
     ) {
       return;
     }
     busy = true;
     lastTriggerAtMs = triggerAtMs;
-    const capturedAt = new Date(triggerAtMs).toISOString();
     const reason: TriggerReason = reasonOverride ?? ev?.reason ?? "rms";
+
+    // 【記録通知の2段階化（改良3）】トリガー瞬間に即時通知する（保存の完了を待たない）。
+    // UI はこれでバッジをフラッシュし「思い出を記録中…」を出す。
+    onEvent?.({ type: "started", reason });
+
+    const capturedAt = new Date(triggerAtMs).toISOString();
     const faceScore = facePipeline?.score() ?? 0;
     const faceTop = facePipeline?.topBlendshapes() ?? [];
     const sttResult = stt.latest();
+    // 重心（改良2）は発火時点のサンプルを全写真 metadata に付ける。
+    // 重心発火なら発火イベント値、それ以外の発火でも直近サンプルを添える。
+    const centroidSample = centroidTrigger.sample();
+    const spectralCentroid = centroidEv?.centroidHz ?? centroidSample.centroidHz ?? undefined;
+    const centroidRiseRatio =
+      centroidEv?.riseRatio ?? centroidSample.riseRatio ?? undefined;
 
-    // metadata 共通部（data-contract.md 付録キー）。
+    // metadata 共通部（data-contract.md 付録キー＋重心 spectral_centroid / centroid_rise_ratio）。
     // face_score は各コマ固有（下の map で上書き）なので base には発火時点値を入れる。
     const baseMeta: CaptureMetadata = {
       rms_db: ev?.rmsDb,
@@ -271,6 +330,8 @@ export function attachDetection(opts: AttachDetectionOptions): DetectionHandle {
       blendshapes_top: faceTop.length > 0 ? faceTop : undefined,
       stt_text: sttResult?.text,
       stt_labels: sttResult?.labels,
+      spectral_centroid: spectralCentroid,
+      centroid_rise_ratio: centroidRiseRatio,
     };
 
     // 【修正1: 発火 busy 永久化の根絶】
@@ -424,10 +485,12 @@ export function attachDetection(opts: AttachDetectionOptions): DetectionHandle {
       busy = false;
     }
 
-    // 部分成果でも保存できていれば発火として通知・カウントする。
+    // 部分成果でも保存できていれば発火として通知・カウントする（改良3・completed）。
+    // 8秒タイムアウトの部分保存でも photoCount は実際に保存できた枚数（prog.photoCount）に整合する。
     if (prog.savedPhotos || prog.savedAudio) {
       triggerCount += 1;
       onEvent?.({
+        type: "completed",
         reason,
         photoCount: prog.photoCount,
         hasAudio: prog.savedAudio,
@@ -439,9 +502,26 @@ export function attachDetection(opts: AttachDetectionOptions): DetectionHandle {
   // --- RMS サンプル → 発火判定 ----------------------------------------------
   function onRms(rmsDb: number, nowMs: number): void {
     if (!running) return;
+    lastRmsDb = rmsDb; // onCentroid の発話ゲート判定に使う。
     const ev = rmsTrigger.push(rmsDb, nowMs);
     if (ev) {
       void handleTrigger(ev);
+    }
+  }
+
+  // --- スペクトル重心サンプル → 発火判定（改良2）-----------------------------
+  // 発話フレーム（rmsDb ≥ ノイズフロア +SPEECH_GATE_DB）のみ centroidTrigger へ渡す
+  //（非発話時は無視）。基準比 +20% を 200ms 持続で reason="centroid" を発火する。
+  // 発火は handleTrigger 経由で RMS/STT と共有クールダウン（4秒）が適用される。
+  function onCentroid(centroidHz: number, nowMs: number): void {
+    if (!running) return;
+    // 発話ゲート: ノイズフロア未推定の間は発話判定できないため無視する。
+    if (lastRmsDb === null || lastNoiseFloorDb === null) return;
+    const isSpeech = lastRmsDb >= lastNoiseFloorDb + DEFAULT_RMS_PARAMS.speechGateDb;
+    if (!isSpeech) return;
+    const ev = centroidTrigger.push(centroidHz, nowMs);
+    if (ev) {
+      void handleTrigger(null, "centroid", ev);
     }
   }
 
@@ -509,8 +589,20 @@ export function attachDetection(opts: AttachDetectionOptions): DetectionHandle {
         sustainedMs: rms.sustainedMs,
         cooldownRemainingMs: rms.cooldownRemainingMs,
         vadFloorDb: rms.vadFloorDb,
-        inWarmup: rms.inWarmup,
+        frozen: rms.frozen,
+        mode: rms.mode,
+        speechAccumMs: rms.speechAccumMs,
+        speechMedianDb: rms.speechMedianDb,
       },
+      centroid: (() => {
+        const c = centroidTrigger.snapshot();
+        return {
+          lastCentroidHz: c.lastCentroidHz,
+          baselineHz: c.baselineHz,
+          riseRatio: c.riseRatio,
+          sustainedMs: c.sustainedMs,
+        };
+      })(),
       stt: sttState(),
     };
   }

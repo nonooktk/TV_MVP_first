@@ -42,18 +42,29 @@ RFP（コア技術外部委託バージョン）12章の動作基準と本書ス
 - （2026-07-06 更新・認証の二段構え）家族側ログインは Entra ID 本実装済みだが、
   **アプリ登録（クライアントID）到着までは「二段構え」で運用する**:
   - backend `ENTRA_CLIENT_ID` 未設定・frontend `NEXT_PUBLIC_ENTRA_CLIENT_ID` 未設定の状態では、
-    ログイン画面は出ず、家族側は従来どおり開発用固定トークン（`dev-fixed-token`）で動作する。
+    ログイン画面は出ず、家族側は従来どおり開発用固定トークン（ローカル既定 `dev-fixed-token`）で動作する。
     **本デモ台本・以下の curl 例・Playwright はこの未設定状態を前提に判定できる**（挙動は無変化）。
   - クライアントID を設定して有効化すると、家族側は「Microsoft でサインイン」画面を経由する。
     開発用固定トークンは併存する裏口として残る（テスト家族限定・本番前に無効化）。
     有効化手順は `docs/dev-setup.md` §13-8。
-- 以下のコマンド例で使う変数:
+  - （2026-07-07 更新）**クラウドでは Google を有効化済み・dev トークンはローテーション済み**。
+    旧 `dev-fixed-token` はクラウド API で 401（無効化）。配信バンドルにも dev トークンは
+    焼き込まない（`.env.production` に `NEXT_PUBLIC_DEV_TOKEN` を置かない）。ローカルは従来どおり
+    `dev-fixed-token` で可。クラウドに curl で叩く場合は `$FAMILY_TOKEN` にローテ後の値を入れる。
+- 以下のコマンド例で使う変数（家族トークンは環境変数 `$FAMILY_TOKEN` で与える。
+  **旧 dev-fixed-token の直書きは廃止**＝クラウドではローテーション済みで無効）:
 
 ```bash
 BASE=http://localhost:8000
-FAMILY="Authorization: Bearer dev-fixed-token"   # 家族側（auth-stub の固定トークン）
+# ローカル既定は dev-fixed-token（backend/.env の DEV_FAMILY_TOKEN）。
+# クラウド（$BASE を API URL にする場合）は backend/cloud.env の DEV_FAMILY_TOKEN（ローテ後の値）を使う。
+FAMILY_TOKEN=${FAMILY_TOKEN:-dev-fixed-token}
+FAMILY="Authorization: Bearer $FAMILY_TOKEN"     # 家族側
 DEVICE="X-Device-Token: dev-device-token"        # 高齢者側（seed が既知値にリセット）
 ```
+
+> クラウド API に対して叩く場合は、値を表示せずに読み込める:
+> `export FAMILY_TOKEN="$(grep -E '^DEV_FAMILY_TOKEN=' backend/cloud.env | tail -1 | cut -d= -f2-)"`
 
 - 注意: ステップ1のデバイス登録を実施するとデバイストークンがローテーションされ、
   `dev-device-token` での API 直叩きは 401 になる。復旧は `python scripts/seed.py` の再実行

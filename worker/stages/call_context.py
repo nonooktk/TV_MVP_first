@@ -26,6 +26,7 @@ _TRIGGER_LABELS = {
     "rms": "声の盛り上がり",
     "stt": "感情ワード",
     "face": "表情",
+    "centroid": "声色の変化",
 }
 
 
@@ -130,7 +131,7 @@ def _collect_trigger_summary(metas: list[dict]) -> str | None:
     if not counts:
         return None
 
-    known = [r for r in ("rms", "stt", "face") if r in counts]
+    known = [r for r in ("rms", "stt", "face", "centroid") if r in counts]
     others = [r for r in order if r not in _TRIGGER_LABELS]
     parts = [
         f"{_TRIGGER_LABELS.get(r, r)}{counts[r]}回" for r in known + others

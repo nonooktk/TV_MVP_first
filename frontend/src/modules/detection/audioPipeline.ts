@@ -14,6 +14,8 @@
 // webm になる（MVP の割り切り。用途はラベリングと写真単体閲覧時の再生）。境界が完全一致
 // しないため前後に多少の余白が乗りうるが、検収対象（発火前2秒〜後3秒を含む）は満たす。
 
+import { spectralCentroidHz } from "./centroidTrigger";
+
 /** 音声パイプラインの設定（支給初期値。チューニングは検収対象外）。 */
 export interface AudioPipelineParams {
   /** RMS算出間隔（ms）。 */
@@ -86,6 +88,13 @@ interface Chunk {
 export type RmsListener = (rmsDb: number, nowMs: number) => void;
 
 /**
+ * スペクトル重心(Hz)を受け取るコールバック（改良2）。
+ * RMS と同じ 50ms 間隔で、AnalyserNode の周波数データから算出した重心を渡す。
+ * 発話/非発話の判定は上位（rmsTrigger の発話ゲート）で行うため、ここでは毎サンプル渡す。
+ */
+export type CentroidListener = (centroidHz: number, nowMs: number) => void;
+
+/**
  * 音声パイプライン本体。
  * start() で RMS 算出と MediaRecorder リング保持を開始。
  * buildSnippet() で「先頭チャンク＋発火前2秒〜後3秒」の webm を構成する（発火後3秒待つ）。
@@ -93,11 +102,16 @@ export type RmsListener = (rmsDb: number, nowMs: number) => void;
 /** VAD 床の自動更新を受け取るコールバック（推定した床 dB を渡す）。 */
 export type VadFloorListener = (vadFloorDb: number) => void;
 
+/** ノイズフロア推定を受け取るコールバック（発話ゲート用・改良1）。 */
+export type NoiseFloorListener = (noiseFloorDb: number) => void;
+
 export class AudioPipeline {
   private readonly track: MediaStreamTrack;
   private readonly p: AudioPipelineParams;
   private readonly onRms: RmsListener;
   private readonly onVadFloor: VadFloorListener | null;
+  private readonly onCentroid: CentroidListener | null;
+  private readonly onNoiseFloor: NoiseFloorListener | null;
 
   private audioCtx: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;
@@ -118,12 +132,16 @@ export class AudioPipeline {
     track: MediaStreamTrack,
     onRms: RmsListener,
     params: Partial<AudioPipelineParams> = {},
-    onVadFloor: VadFloorListener | null = null
+    onVadFloor: VadFloorListener | null = null,
+    onCentroid: CentroidListener | null = null,
+    onNoiseFloor: NoiseFloorListener | null = null
   ) {
     this.track = track;
     this.onRms = onRms;
     this.p = { ...DEFAULT_AUDIO_PARAMS, ...params };
     this.onVadFloor = onVadFloor;
+    this.onCentroid = onCentroid;
+    this.onNoiseFloor = onNoiseFloor;
   }
 
   start(): void {
@@ -169,6 +187,9 @@ export class AudioPipeline {
       this.source.connect(this.analyser);
 
       const buf = new Float32Array(this.analyser.fftSize);
+      // スペクトル重心用の周波数データバッファ（dB 配列・長さ = fftSize/2）。
+      const freqBuf = new Float32Array(this.analyser.frequencyBinCount);
+      const sampleRate = this.audioCtx.sampleRate;
       this.rmsTimer = setInterval(() => {
         if (!this.analyser) return;
         this.analyser.getFloatTimeDomainData(buf);
@@ -182,6 +203,14 @@ export class AudioPipeline {
         // 家族側 VAD 床の自動化（item 12）: ノイズフロア推定 → 床を定期反映。
         const floor = this.updateNoiseFloor(db, now);
         if (floor !== null) this.onVadFloor?.(floor);
+        // 発話ゲート用のノイズフロア推定（改良1）を毎サンプル反映する。
+        if (this.noiseFloorDb !== null) this.onNoiseFloor?.(this.noiseFloorDb);
+        // スペクトル重心（改良2）を算出して渡す（発話/非発話の判定は上位に委ねる）。
+        if (this.onCentroid) {
+          this.analyser.getFloatFrequencyData(freqBuf);
+          const centroid = spectralCentroidHz(freqBuf, sampleRate);
+          this.onCentroid(centroid, now);
+        }
       }, this.p.rmsIntervalMs);
     } catch (e) {
       // WebAudio 不可でも検知全体は止めない（RMS が来ないだけ）。
