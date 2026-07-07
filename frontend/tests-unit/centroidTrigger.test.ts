@@ -1,10 +1,19 @@
 // スペクトル重心トリガー（改良2・純粋ロジック）の単体テスト。
 //
+// 【2026-07-07 実測フィードバックによる調整に追随して更新】
+//   - 比率 +20%→+30%（CENTROID_RISE_RATIO=1.3）
+//   - 発話ゲート成立（isSpeech）を発火条件に同時必須化。push シグネチャに isSpeech を追加。
+//     持続カウントも発話フレームのみで積算し、非発話フレームでリセットする。
+//   - リアーム条件の追加: 発火後は基準比が閾値未満に一度戻るまで再発火しない
+//
 // 検証観点（承認済み仕様・docs/detection-params.md 準拠）:
-//   1. 基準（発話重心の中央値）が確立してから、基準比 +20% を 200ms 持続で発火する
+//   1. 基準（発話重心の中央値）が確立してから、基準比 +30% を 200ms 持続 かつ 発話ゲート成立で発火する
 //   2. 持続不足では発火しない
-//   3. 盛り上がり（基準比 ≥ 1.2）のフレームは中央値窓に入れない（基準を吊り上げない）
+//   3. 盛り上がり（基準比 ≥ 1.3）のフレームは中央値窓に入れない（基準を吊り上げない）
 //   4. spectralCentroidHz: 高域にエネルギーが偏るほど重心が高くなる
+//   5. 無言非発火: 発話ゲート不成立時は持続が積まれず発火しない（音圧が変わらなくても重心だけ
+//      上がった無言区間で誤発火しないことを確認）
+//   6. リアーム: 発火→高止まり中は再発火しない→比率が閾値未満に戻って再度上がると発火する
 
 import { describe, expect, it } from "vitest";
 import {
@@ -16,23 +25,23 @@ import {
 const DT = DEFAULT_CENTROID_PARAMS.sampleIntervalMs; // 50ms
 
 describe("CentroidTrigger", () => {
-  it("基準確立後、基準比 +20% を 200ms 持続すると発火する", () => {
+  it("基準確立後、基準比 +30% を 200ms 持続（発話ゲート成立）すると発火する", () => {
     const trig = new CentroidTrigger();
     let t = 0;
 
-    // 平常の重心 1000Hz を 2 秒（40サンプル）流して基準（中央値）を 1000 に確立。
+    // 平常の重心 1000Hz を 2 秒（40サンプル）流して基準（中央値）を 1000 に確立（発話フレーム）。
     for (let i = 0; i < 40; i++) {
-      const ev = trig.push(1000, t);
+      const ev = trig.push(1000, true, t);
       expect(ev).toBeNull(); // 基準比 1.0 では発火しない
       t += DT;
     }
     expect(trig.snapshot().baselineHz).toBeCloseTo(1000, 0);
 
-    // 声色が高くなる: 1250Hz（基準比 +25% ≥ +20%）を 200ms（4サンプル）以上持続。
+    // 声色が高くなる: 1350Hz（基準比 +35% ≥ +30%）を 200ms（4サンプル）以上持続かつ発話中。
     let fired = 0;
     let firedEv = null;
     for (let i = 0; i < 6; i++) {
-      const ev = trig.push(1250, t);
+      const ev = trig.push(1350, true, t);
       if (ev) {
         fired += 1;
         firedEv = ev;
@@ -40,8 +49,8 @@ describe("CentroidTrigger", () => {
       t += DT;
     }
     expect(fired).toBe(1);
-    expect(firedEv!.centroidHz).toBe(1250);
-    expect(firedEv!.riseRatio).toBeGreaterThanOrEqual(1.2);
+    expect(firedEv!.centroidHz).toBe(1350);
+    expect(firedEv!.riseRatio).toBeGreaterThanOrEqual(1.3);
     expect(firedEv!.baselineHz).toBeCloseTo(1000, 0);
   });
 
@@ -49,36 +58,36 @@ describe("CentroidTrigger", () => {
     const trig = new CentroidTrigger();
     let t = 0;
     for (let i = 0; i < 40; i++) {
-      trig.push(1000, t);
+      trig.push(1000, true, t);
       t += DT;
     }
-    // +25% を 3 サンプル（150ms < 200ms）だけ与えては平常へ戻す、を繰り返す。
+    // +35% を 3 サンプル（150ms < 200ms）だけ与えては平常へ戻す、を繰り返す。
     let fired = 0;
     for (let cycle = 0; cycle < 5; cycle++) {
       for (let i = 0; i < 3; i++) {
-        if (trig.push(1250, t)) fired += 1;
+        if (trig.push(1350, true, t)) fired += 1;
         t += DT;
       }
       for (let i = 0; i < 5; i++) {
-        if (trig.push(1000, t)) fired += 1;
+        if (trig.push(1000, true, t)) fired += 1;
         t += DT;
       }
     }
     expect(fired).toBe(0);
   });
 
-  it("盛り上がり（+20% 超）のフレームは中央値窓に入らず基準を吊り上げない", () => {
+  it("盛り上がり（+30% 超）のフレームは中央値窓に入らず基準を吊り上げない", () => {
     const trig = new CentroidTrigger();
     let t = 0;
     // 平常 1000Hz を 2 秒。基準 1000。
     for (let i = 0; i < 40; i++) {
-      trig.push(1000, t);
+      trig.push(1000, true, t);
       t += DT;
     }
     const base0 = trig.snapshot().baselineHz!;
-    // 高い声 1400Hz（+40%）を長く流しても、盛り上がりは窓に入らないため基準は 1000 付近据え置き。
+    // 高い声 1500Hz（+50%）を長く流しても、盛り上がりは窓に入らないため基準は 1000 付近据え置き。
     for (let i = 0; i < 100; i++) {
-      trig.push(1400, t);
+      trig.push(1500, true, t);
       t += DT;
     }
     const base1 = trig.snapshot().baselineHz!;
@@ -89,13 +98,105 @@ describe("CentroidTrigger", () => {
     const trig = new CentroidTrigger();
     let t = 0;
     for (let i = 0; i < 40; i++) {
-      trig.push(1000, t);
+      trig.push(1000, true, t);
       t += DT;
     }
-    trig.push(1300, t);
+    trig.push(1300, true, t);
     const s = trig.sample();
     expect(s.centroidHz).toBe(1300);
     expect(s.riseRatio).toBeCloseTo(1.3, 1);
+  });
+
+  // --- 発話ゲート必須化（2026-07-07）-------------------------------------------
+
+  it("無言非発火: 発話ゲート不成立のフレームでは持続が積まれず発火しない", () => {
+    const trig = new CentroidTrigger();
+    let t = 0;
+    // 発話フレームで基準 1000Hz を確立。
+    for (let i = 0; i < 40; i++) {
+      trig.push(1000, true, t);
+      t += DT;
+    }
+    // 重心だけが +35%（1350Hz）に上がっているが、非発話（isSpeech=false）のフレームとして
+    // 200ms 超（6サンプル）投入する → 発話ゲート不成立のため発火しない。
+    let fired = 0;
+    for (let i = 0; i < 6; i++) {
+      const ev = trig.push(1350, false, t);
+      if (ev) fired += 1;
+      t += DT;
+    }
+    expect(fired).toBe(0);
+    // 持続カウントも積まれていない（非発話でリセットされ続ける）。
+    expect(trig.snapshot().sustainedMs).toBe(0);
+  });
+
+  it("無言非発火: 発話↔非発話が交互だと持続がリセットされ続けて発火しない", () => {
+    const trig = new CentroidTrigger();
+    let t = 0;
+    for (let i = 0; i < 40; i++) {
+      trig.push(1000, true, t);
+      t += DT;
+    }
+    // 発話フレームで基準比 +35%（1350Hz）→ 非発話フレームで同じ値、を交互に与える。
+    // 発話フレームの連続が sustainMs(200ms=4サンプル) に届く前に非発話でリセットされる。
+    let fired = 0;
+    for (let cycle = 0; cycle < 10; cycle++) {
+      for (let i = 0; i < 2; i++) {
+        // 200ms未満
+        if (trig.push(1350, true, t)) fired += 1;
+        t += DT;
+      }
+      if (trig.push(1350, false, t)) fired += 1; // 非発話でリセット
+      t += DT;
+    }
+    expect(fired).toBe(0);
+  });
+
+  // --- リアーム条件（2026-07-07 追加）-----------------------------------------
+
+  it("リアーム: 発火→高止まり中は再発火しない→比率が閾値未満に戻って再度上がると発火する", () => {
+    const trig = new CentroidTrigger();
+    let t = 0;
+    for (let i = 0; i < 40; i++) {
+      trig.push(1000, true, t);
+      t += DT;
+    }
+
+    // 1回目発火（1350Hz・+35%）。
+    let fired1 = 0;
+    for (let i = 0; i < 6; i++) {
+      const ev = trig.push(1350, true, t);
+      if (ev) fired1 += 1;
+      t += DT;
+    }
+    expect(fired1).toBe(1);
+    expect(trig.snapshot().armed).toBe(false);
+
+    // 高止まりのまま（1350Hz）続けても再発火しない（armed=false のため）。
+    let firedWhileHigh = 0;
+    for (let i = 0; i < 20; i++) {
+      const ev = trig.push(1350, true, t);
+      if (ev) firedWhileHigh += 1;
+      t += DT;
+    }
+    expect(firedWhileHigh).toBe(0);
+    expect(trig.snapshot().armed).toBe(false);
+
+    // 基準比が閾値未満（1000Hz＝比率1.0）に戻る → armed=true に復帰。
+    for (let i = 0; i < 4; i++) {
+      trig.push(1000, true, t);
+      t += DT;
+    }
+    expect(trig.snapshot().armed).toBe(true);
+
+    // 再度 +35% へ上げると発火する。
+    let fired2 = 0;
+    for (let i = 0; i < 6; i++) {
+      const ev = trig.push(1350, true, t);
+      if (ev) fired2 += 1;
+      t += DT;
+    }
+    expect(fired2).toBe(1);
   });
 });
 

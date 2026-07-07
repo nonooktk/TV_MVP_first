@@ -171,6 +171,16 @@ export interface DetectionRuntimeState {
     vadFloorDb: number;
     /** baseline 学習が凍結中か（rise ≥ しきい値で盛り上がりを取り込まない）。デバッグパネル用。 */
     frozen: boolean;
+    /**
+     * 現在モードの rise 閾値（dB）。provisional=+24dB／speech=+12dB（2026-07-07 モード依存化）。
+     * デバッグパネルの「パラメータ現在値」表示用。
+     */
+    riseThresholdDb: number;
+    /**
+     * リアーム済み（再発火可能）か（2026-07-07 追加）。発火直後は false、
+     * rise が現行閾値未満に一度戻ると true に復帰する。デバッグパネル用。
+     */
+    armed: boolean;
     /** 基準モード（provisional=仮基準 / speech=発話基準）。改良1。 */
     mode: "provisional" | "speech";
     /** 発話（ノイズ+8dB 以上）の累計時間（ms）。5秒で speech モードへ。改良1。 */
@@ -188,6 +198,11 @@ export interface DetectionRuntimeState {
     riseRatio: number | null;
     /** 上昇（基準比 ≥ しきい値）の持続累積（ms）。sustainMs に達すると発火する。 */
     sustainedMs: number;
+    /**
+     * リアーム済み（再発火可能）か（2026-07-07 追加）。発火直後は false、
+     * 基準比が閾値未満に一度戻ると true に復帰する。デバッグパネル用。
+     */
+    armed: boolean;
   };
   /** STT（感情ワード検知）の状態。STT 無効時は enabled=false。 */
   stt: SttRuntimeState;
@@ -509,17 +524,20 @@ export function attachDetection(opts: AttachDetectionOptions): DetectionHandle {
     }
   }
 
-  // --- スペクトル重心サンプル → 発火判定（改良2）-----------------------------
-  // 発話フレーム（rmsDb ≥ ノイズフロア +SPEECH_GATE_DB）のみ centroidTrigger へ渡す
-  //（非発話時は無視）。基準比 +20% を 200ms 持続で reason="centroid" を発火する。
-  // 発火は handleTrigger 経由で RMS/STT と共有クールダウン（4秒）が適用される。
+  // --- スペクトル重心サンプル → 発火判定（改良2・2026-07-07 厳密化）---------
+  // 発話ゲート成立可否（rmsDb ≥ ノイズフロア +SPEECH_GATE_DB）を毎フレーム centroidTrigger へ
+  // 渡す。非発話フレームは centroidTrigger 内部で基準を動かさず持続カウントをリセットする
+  // （無言時の発火排除の厳密化）。基準比 +30% を 200ms 持続**かつ発話ゲート成立**で
+  // reason="centroid" を発火する。発火は handleTrigger 経由で RMS/STT と共有クールダウン
+  // （8秒）が適用される。
   function onCentroid(centroidHz: number, nowMs: number): void {
     if (!running) return;
-    // 発話ゲート: ノイズフロア未推定の間は発話判定できないため無視する。
-    if (lastRmsDb === null || lastNoiseFloorDb === null) return;
-    const isSpeech = lastRmsDb >= lastNoiseFloorDb + DEFAULT_RMS_PARAMS.speechGateDb;
-    if (!isSpeech) return;
-    const ev = centroidTrigger.push(centroidHz, nowMs);
+    // 発話ゲート: ノイズフロア未推定の間は発話判定できないため非発話扱い（持続は積まない）。
+    const isSpeech =
+      lastRmsDb !== null &&
+      lastNoiseFloorDb !== null &&
+      lastRmsDb >= lastNoiseFloorDb + DEFAULT_RMS_PARAMS.speechGateDb;
+    const ev = centroidTrigger.push(centroidHz, isSpeech, nowMs);
     if (ev) {
       void handleTrigger(null, "centroid", ev);
     }
@@ -590,6 +608,8 @@ export function attachDetection(opts: AttachDetectionOptions): DetectionHandle {
         cooldownRemainingMs: rms.cooldownRemainingMs,
         vadFloorDb: rms.vadFloorDb,
         frozen: rms.frozen,
+        riseThresholdDb: rms.riseThresholdDb,
+        armed: rms.armed,
         mode: rms.mode,
         speechAccumMs: rms.speechAccumMs,
         speechMedianDb: rms.speechMedianDb,
@@ -601,6 +621,7 @@ export function attachDetection(opts: AttachDetectionOptions): DetectionHandle {
           baselineHz: c.baselineHz,
           riseRatio: c.riseRatio,
           sustainedMs: c.sustainedMs,
+          armed: c.armed,
         };
       })(),
       stt: sttState(),

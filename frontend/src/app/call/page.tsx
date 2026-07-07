@@ -623,16 +623,26 @@ function DebugPanel({ state, autoGain, dbCounts, lastCaptureAt }: DebugPanelProp
         ["rise", rms?.riseDb == null ? "—" : `+${fmt(rms.riseDb)}dB`],
         ["sustain", `${Math.round(rms?.sustainedMs ?? 0)}ms`],
         ["cooldown", `${((rms?.cooldownRemainingMs ?? 0) / 1000).toFixed(1)}s`],
+        // リアーム状態（2026-07-07 追加）: 発火後は false → rise が閾値未満に戻ると true。
+        ["armed", rms == null ? "—" : rms.armed ? "済" : "未（高止まり中）"],
         ["busy", state?.busy ? "YES" : "no"],
         ["triggers", String(state?.triggerCount ?? 0)],
       ],
     ],
     [
-      // 調整議論用にパラメータ現在値を明示する
-      //（+6dB / 150ms / 4s / 動的 vadFloor / baseline 学習の凍結状態と非対称τ）。
+      // 調整議論用にパラメータ現在値を明示する（モード連動・2026-07-07）:
+      // rise_th は現行モード（仮基準+24dB／発話基準+12dB）の値をそのまま表示する。
+      // sustainMs 150ms・cooldownMs 8s・動的 vadFloor・baseline 学習の凍結状態と非対称τ。
       "パラメータ現在値",
       [
-        ["rise_th", `+${P.riseThresholdDb}dB`],
+        [
+          "rise_th（モード連動）",
+          rms == null
+            ? "—"
+            : `+${rms.riseThresholdDb}dB (${
+                rms.mode === "speech" ? "発話基準" : "仮基準"
+              })`,
+        ],
         ["sustainMs", `${P.sustainMs}ms`],
         ["cooldownMs", `${(P.cooldownMs / 1000).toFixed(0)}s`],
         ["vadFloor(動的)", rms?.vadFloorDb == null ? "—" : `${fmt(rms.vadFloorDb)}dB`],
@@ -697,6 +707,8 @@ function DebugPanel({ state, autoGain, dbCounts, lastCaptureAt }: DebugPanelProp
           "持続",
           `${Math.round(centroid?.sustainedMs ?? 0)}ms / ${DEFAULT_CENTROID_PARAMS.sustainMs}ms`,
         ],
+        // リアーム状態（2026-07-07 追加）: 発火後は false → 基準比が閾値未満に戻ると true。
+        ["armed", centroid == null ? "—" : centroid.armed ? "済" : "未（高止まり中）"],
       ],
     ],
     [

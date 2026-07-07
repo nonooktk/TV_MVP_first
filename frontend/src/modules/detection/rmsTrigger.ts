@@ -5,18 +5,30 @@
 //     この baseline からの相対上昇（rms_rise）でスコア化する。
 //   - VADゲート: 無音（簡易閾値未満）では baseline を更新せず発火もしない。
 //   - 持続: 上昇状態が 150〜300ms 続いたら発火とみなす。
-//   - クールダウン: 発火後 3〜5s は次の発火をしない。
+//   - クールダウン: 発火後 8s は次の発火をしない（2026-07-07 実測フィードバックで 4s→8s）。
 //
 // 【baseline の静音区間ベース再設計（2026-07-07）】
 //   1. 仮初期値: 初回有声サンプルで baseline = min(サンプル値, provisionalBaselineDb=-32)。
 //      自動ゲイン目標 -30dBFS と整合させた仮値。冒頭がいきなり大声でも仮値(-32)を採用するため、
 //      その大声との差（rise）が大きく取れ、冒頭からでも発火できる。冒頭が静かな声ならその値を
 //      採用する（min なので平常側に寄る）。
-//   2. 定常区間のみ学習: rise（現在値 − baseline）が riseThresholdDb 以上の間は EMA 更新を凍結する。
-//      盛り上がり（発話のピーク）を平常基準に取り込まない＝「静かに戻った区間」だけで学習する。
+//   2. 定常区間のみ学習: rise（現在値 − baseline）が現行モードの rise 閾値以上の間は EMA 更新を
+//      凍結する。盛り上がり（発話のピーク）を平常基準に取り込まない＝「静かに戻った区間」だけで
+//      学習する。
 //   3. 非対称追従: 更新時、baseline が上がる方向は τ=8s（ゆっくり）、下がる方向は τ=2s（速い）。
 //      環境が静かになったら基準を速やかに引き下げ、うるさくなっても基準はゆっくりしか上げない。
 //   ※ 旧「ウォームアップ機構（warmupMs / warmupTauMs）」は本方式に置換して廃止した。
+//
+// 【rise 閾値のモード依存化（2026-07-07 実測フィードバック）】
+//   基準モード（改良1の Phase 1/2）によって rise 閾値を変える。仮基準（provisional）はまだ
+//   baseline が安定しておらず誤発火しやすいため閾値を高く（+24dB）、発話基準（speech）は
+//   baseline が話し声の実測中央値に収束済みで信頼できるため閾値を低く（+12dB）する。
+//   凍結判定・持続カウント・発火判定は、いずれもその時点のモードの閾値を参照する。
+//
+// 【リアーム条件（2026-07-07 実測フィードバック）】
+//   発火後は「rise が現行閾値未満に一度戻る」まで再発火しない（armed=false）。クールダウンとは
+//   独立の AND 条件で、クールダウンが明けても声を張ったままなら再発火させない
+//   （鳴りっぱなし・連続再発火の防止）。rise が閾値未満に戻ると armed=true に復帰する。
 //
 // このファイルは DOM / WebAudio に一切依存しない純粋ロジック（vitest で単体テストする）。
 // パラメータは 1 つの設定オブジェクトに集約する。
@@ -95,11 +107,21 @@ export interface RmsTriggerParams {
   baselineTauDownMs: number;
   /** VADゲートのしきい値（dB）。これ未満は無音とみなし baseline 更新も発火もしない。 */
   vadFloorDb: number;
-  /** 発火とみなす baseline からの相対上昇量（dB）。実測で調整（検収対象外）。 */
-  riseThresholdDb: number;
-  /** 発火に必要な上昇の持続時間（ms）。150〜300ms（初期値200ms）。 */
+  /**
+   * 発火とみなす baseline からの相対上昇量（dB・仮基準=provisional モード時）。
+   * まだ baseline が安定していない段階のため、誤発火を避けて高めに設定する。
+   * 実測で調整（検収対象外）。2026-07-07: モード依存化に伴い riseThresholdDb を分割。
+   */
+  riseThresholdProvisionalDb: number;
+  /**
+   * 発火とみなす baseline からの相対上昇量（dB・発話基準=speech モード時）。
+   * baseline が発話中央値に収束済みで信頼できるため、仮基準より低く（感度高く）設定する。
+   * 実測で調整（検収対象外）。
+   */
+  riseThresholdSpeechDb: number;
+  /** 発火に必要な上昇の持続時間（ms）。150〜300ms（初期値150ms）。 */
   sustainMs: number;
-  /** 発火後のクールダウン（ms）。3〜5s（初期値4s）。 */
+  /** 発火後のクールダウン（ms）。2026-07-07 実測フィードバックにより 4s→8s。 */
   cooldownMs: number;
 
   // --- 基準レベルの2段階化（改良1・発話基準）-------------------------------
@@ -140,13 +162,16 @@ export const DEFAULT_RMS_PARAMS: RmsTriggerParams = {
   baselineTauUpMs: 8000, // 上がる方向 τ=8s（うるさくなっても基準はゆっくり上げる）
   baselineTauDownMs: 2000, // 下がる方向 τ=2s（静かに戻ったら基準を速やかに下げる）
   vadFloorDb: -55, // これ未満は無音（VADゲート・簡易閾値）
-  // baseline比 +6dB で「声を張った」とみなす。
-  // 2026-07-05 オーナー実測フィードバックにより +8dB → +6dB（発火が渋いため感度UP）。
-  riseThresholdDb: 6,
+  // rise 閾値のモード依存化（2026-07-07 実測フィードバック）。
+  // 仮基準（provisional）は baseline がまだ安定していないため高め（+24dB）、
+  // 発話基準（speech）は baseline が発話中央値に収束済みで信頼できるため低め（+12dB）。
+  riseThresholdProvisionalDb: 24,
+  riseThresholdSpeechDb: 12,
   // 発火に必要な上昇の持続。150〜300ms の下限（発火を出やすくする）。
   // 2026-07-05 オーナー実測フィードバックにより 200ms → 150ms。
   sustainMs: 150,
-  cooldownMs: 4000, // 3〜5s の中央（据え置き）
+  // 2026-07-07 実測フィードバックにより 4s → 8s（RMS・STT・重心で共有）。
+  cooldownMs: 8000,
   // 基準レベルの2段階化（改良1・発話基準）。
   speechGateDb: 8, // ノイズフロア +8dB 以上を発話とみなす（SPEECH_GATE_DB）
   speechAccumMs: 5000, // 発話累計5秒で Phase 2（発話基準）へ切替（SPEECH_ACCUM_MS）
@@ -181,10 +206,21 @@ export interface RmsTriggerState {
   vadFloorDb: number;
   /**
    * baseline 学習が凍結中か（静音区間ベース再設計 2026-07-07）。
-   * 直近の有声サンプルの rise（現在値 − baseline）が riseThresholdDb 以上で、盛り上がりを
+   * 直近の有声サンプルの rise（現在値 − baseline）が現行モードの rise 閾値以上で、盛り上がりを
    * 平常基準に取り込まないよう EMA 更新を止めている状態。デバッグパネルの「凍結中」表示用。
    */
   frozen: boolean;
+  /**
+   * 現在モードの rise 閾値（dB）。provisional=+24dB／speech=+12dB（2026-07-07）。
+   * デバッグパネルの「パラメータ現在値」表示用（モード連動）。
+   */
+  riseThresholdDb: number;
+  /**
+   * リアーム済み（再発火可能）か（2026-07-07 追加）。
+   * 発火直後は false になり、rise が現行閾値未満に一度戻ると true に復帰する。
+   * クールダウンとは独立の AND 条件（鳴りっぱなし・連続再発火の防止）。デバッグパネル用。
+   */
+  armed: boolean;
 
   // --- 基準レベルの2段階化（改良1・発話基準）-------------------------------
   /**
@@ -219,9 +255,12 @@ export class RmsTrigger {
   private lastTimeMs: number | null = null;
   private lastRmsDb: number | null = null;
   private triggerCount = 0;
-  // baseline 学習が凍結中か（静音区間ベース再設計）。直近サンプルの rise が riseThresholdDb
-  // 以上のとき true。盛り上がり区間の値を平常基準に取り込まないよう EMA 更新を止める。
+  // baseline 学習が凍結中か（静音区間ベース再設計）。直近サンプルの rise が現行モードの
+  // rise 閾値以上のとき true。盛り上がり区間の値を平常基準に取り込まないよう EMA 更新を止める。
   private frozen = false;
+  // リアーム済み（再発火可能）か（2026-07-07 追加）。発火直後は false になり、
+  // rise が現行閾値未満に一度戻ると true に復帰する。クールダウンとは独立の AND 条件。
+  private armed = true;
 
   // --- 基準レベルの2段階化（改良1・発話基準）--------------------------------
   // 発話ゲート用のノイズフロア推定（audioPipeline から setNoiseFloorDb で反映）。
@@ -274,6 +313,18 @@ export class RmsTrigger {
   }
 
   /**
+   * 現在モードの rise 閾値（dB）。モード依存化（2026-07-07）。
+   * provisional（仮基準）= riseThresholdProvisionalDb（+24dB）／
+   * speech（発話基準）= riseThresholdSpeechDb（+12dB）。
+   * 凍結判定・持続カウント・発火判定はすべてこの値を参照する。
+   */
+  private currentRiseThresholdDb(): number {
+    return this.mode === "speech"
+      ? this.p.riseThresholdSpeechDb
+      : this.p.riseThresholdProvisionalDb;
+  }
+
+  /**
    * 1サンプルを投入する。発火したら RmsTriggerEvent、しなければ null。
    * @param rmsDb このサンプルの音圧（dB）
    * @param nowMs 現在時刻（ms・単調増加。テストでは擬似時刻を渡す）
@@ -288,8 +339,11 @@ export class RmsTrigger {
     this.lastRmsDb = rmsDb;
 
     // --- VADゲート: 無音は baseline を更新せず、持続もリセットして即 return -------
+    // 無音（rise が評価不能）は「声が収まった」とみなしてリアームする（2026-07-07 追加）。
+    // 大声の直後に静寂に戻るケースで、次の有声発話まで再発火不能のまま固まらないようにする。
     if (rmsDb < this.p.vadFloorDb) {
       this.sustainedMs = 0;
+      this.armed = true;
       return null;
     }
 
@@ -304,10 +358,18 @@ export class RmsTrigger {
 
     // rise は「現在の baseline」との差で評価する（この後の凍結判定にも使う）。
     const rise = rmsDb - this.baselineDb;
+    // 現行モード（provisional/speech）の rise 閾値（2026-07-07 モード依存化）。
+    const riseThresholdDb = this.currentRiseThresholdDb();
 
-    // 【定常区間のみ学習】rise が riseThresholdDb 以上の間は EMA 更新を凍結する
+    // 【定常区間のみ学習】rise が現行閾値以上の間は EMA 更新を凍結する
     //（盛り上がりのピークを平常基準に取り込まない）。凍結解除は rise が閾値未満に戻ったとき。
-    this.frozen = rise >= this.p.riseThresholdDb;
+    this.frozen = rise >= riseThresholdDb;
+
+    // 【リアーム（2026-07-07 追加）】rise が現行閾値未満に戻ったら再発火可能にする。
+    // クールダウンとは独立の AND 条件（鳴りっぱなし・連続再発火の防止）。
+    if (rise < riseThresholdDb) {
+      this.armed = true;
+    }
 
     // --- 基準レベルの2段階化（改良1・発話基準）-------------------------------
     // このサンプルが「発話フレーム」か（ノイズフロア +speechGateDb 以上）。
@@ -350,7 +412,7 @@ export class RmsTrigger {
     }
 
     // --- 持続カウント: 上昇しきい値を超えている間だけ積算 -----------------------
-    if (rise >= this.p.riseThresholdDb) {
+    if (rise >= riseThresholdDb) {
       this.sustainedMs += dt;
     } else {
       this.sustainedMs = 0;
@@ -361,11 +423,18 @@ export class RmsTrigger {
       return null;
     }
 
+    // --- リアーム未済（前回発火から rise が閾値未満へ戻っていない）は発火しない ---
+    // （2026-07-07 追加。クールダウンと AND。鳴りっぱなし・連続再発火の防止）。
+    if (!this.armed) {
+      return null;
+    }
+
     // --- 発火判定: 持続が閾値に達したら発火 -------------------------------------
     if (this.sustainedMs >= this.p.sustainMs) {
       this.cooldownUntilMs = nowMs + this.p.cooldownMs;
       this.sustainedMs = 0;
       this.triggerCount += 1;
+      this.armed = false; // リアーム解除: rise が閾値未満に戻るまで再発火しない
       return {
         rmsDb,
         rmsRise: rise,
@@ -393,6 +462,8 @@ export class RmsTrigger {
       cooldownRemainingMs: Math.max(0, this.cooldownUntilMs - nowMs),
       vadFloorDb: this.p.vadFloorDb,
       frozen: this.frozen,
+      riseThresholdDb: this.currentRiseThresholdDb(),
+      armed: this.armed,
       mode: this.mode,
       speechAccumMs: this.speechAccumMs,
       speechMedianDb: this.speechMedian.median(),
