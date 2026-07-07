@@ -188,29 +188,49 @@ test("M2 フルチェーン: 発火→IndexedDB→同期→候補→選択→動
   // forceTrigger は実発火と同経路（handleTrigger）を await 完了まで待つ
   // （buildSnippet の postRoll(3s)+timeslice(1s) を含む）。
 
-  // 1回目の発火。
+  // 発火前に busy が false へ落ち着くのを待つヘルパ（改良2で重心/RMS の自動発火が
+  // フェイク音声上で起き得るため、競合キャプチャ中に forceTrigger が no-op になるのを避ける）。
+  const waitBusyFalse = async (): Promise<void> => {
+    await pageFamily.waitForFunction(
+      () => (window as any).__detection?.state?.busy === false,
+      undefined,
+      { timeout: 15_000 }
+    );
+  };
+
+  // 1回目の発火（自動発火のキャプチャが走っていれば落ち着くまで待ってから）。
+  await waitBusyFalse();
+  const countBefore1 = await pageFamily.evaluate(
+    () => (window as any).__detection?.state?.triggerCount ?? 0
+  );
   await pageFamily.evaluate(async () => {
     await (window as any).__detection.forceTrigger();
   });
-  // 1回目完了後: busy が解除され triggerCount=1（＝永久 busy 化していない）。
+  await waitBusyFalse();
+  // 1回目完了後: busy が解除され triggerCount が 1 増える（＝永久 busy 化していない）。
   const afterFirst = await pageFamily.evaluate(() => ({
     busy: (window as any).__detection?.state?.busy,
     triggerCount: (window as any).__detection?.state?.triggerCount,
   }));
   console.log(
-    `1回目発火後: busy=${afterFirst.busy} triggerCount=${afterFirst.triggerCount}`
+    `1回目発火後: busy=${afterFirst.busy} triggerCount=${afterFirst.triggerCount}（before=${countBefore1}）`
   );
   expect(afterFirst.busy).toBe(false); // busy 解除（永久化していない）
-  expect(afterFirst.triggerCount).toBe(1);
+  expect(afterFirst.triggerCount).toBeGreaterThan(countBefore1); // forceTrigger で増える
 
   // 4秒空ける（クールダウン明けを模す。forceTrigger 自体は共有クールダウン非適用だが、
   // 実運用の連続発火に近づける）。
   await pageFamily.waitForTimeout(4000);
 
-  // 2回目の発火。
+  // 2回目の発火（同様に busy 落ち着き待ち）。
+  await waitBusyFalse();
+  const countBefore2 = await pageFamily.evaluate(
+    () => (window as any).__detection?.state?.triggerCount ?? 0
+  );
   await pageFamily.evaluate(async () => {
     await (window as any).__detection.forceTrigger();
   });
+  await waitBusyFalse();
   const afterSecond = await pageFamily.evaluate(() => ({
     busy: (window as any).__detection?.state?.busy,
     triggerCount: (window as any).__detection?.state?.triggerCount,
@@ -219,11 +239,15 @@ test("M2 フルチェーン: 発火→IndexedDB→同期→候補→選択→動
     `2回目発火後: busy=${afterSecond.busy} triggerCount=${afterSecond.triggerCount}`
   );
   expect(afterSecond.busy).toBe(false);
-  expect(afterSecond.triggerCount).toBe(2); // 連続発火で triggerCount が増える
+  // 2回の forceTrigger でそれぞれ triggerCount が増える（＝連続発火が生きている）。
+  // ※ 改良2でフェイク音声上の重心/RMS 自動発火も混じり得るため、厳密な 2 ではなく
+  //   「1回目の後 → 2回目の後で増える」ことを確認する。
+  expect(afterSecond.triggerCount).toBeGreaterThan(afterFirst.triggerCount);
 
-  // --- IndexedDB に「2バースト分の連写＋look-backコマ」の photo と audio 2件 ----
-  // 連写(lookback=false)がちょうど20枚（10枚×2発火）、look-back(lookback=true)が2コマ以上
-  // 含まれること（RFP12 コア②: 連写10枚＋発火前のコマ、を2発火ぶん）を確認する。
+  // --- IndexedDB に「複数バースト分の連写＋look-backコマ」の photo と audio が入る ----
+  // 連写(lookback=false)は 10枚×発火回数（自動発火が混じると 20 以上）、
+  // look-back(lookback=true)を各発火で含み、音声スニペットも発火ぶん入ることを確認する
+  //（RFP12 コア②: 連写10枚＋発火前のコマ）。厳密数は自動発火で揺れるため下限で検証する。
   const counts = await pageFamily.evaluate(async (cid) => {
     const db: IDBDatabase = await new Promise((resolve, reject) => {
       const req = indexedDB.open("tvmvp-detection", 1);
@@ -249,10 +273,12 @@ test("M2 フルチェーン: 発火→IndexedDB→同期→候補→選択→動
   console.log(
     `IndexedDB: photos=${counts.total}（連写${counts.burst}＋look-back${counts.lookback}） audio=${counts.audio}`
   );
-  expect(counts.burst).toBe(20); // 連写ちょうど10枚 × 2発火
+  expect(counts.burst).toBeGreaterThanOrEqual(20); // 連写10枚 × 2発火以上（自動発火で増える）
+  expect(counts.burst % 10).toBe(0); // 連写は必ず10枚単位で積まれる
   expect(counts.lookback).toBeGreaterThanOrEqual(2); // look-back（発火前コマ）を各発火で含む
-  expect(counts.audio).toBe(2); // 音声スニペット 2件（2発火ぶん）
+  expect(counts.audio).toBeGreaterThanOrEqual(2); // 音声スニペット 2件以上（発火ぶん）
   const totalPhotos = counts.total;
+  const totalAudio = counts.audio;
 
   // --- 家族「通話を終了する」→ 同期完了（__sync.state.done） ------------------
   await pageFamily.getByRole("button", { name: "通話を終了する" }).click();
@@ -265,7 +291,7 @@ test("M2 フルチェーン: 発火→IndexedDB→同期→候補→選択→動
     () => (window as any).__sync.state.registeredMemories as number
   );
   console.log(`同期 registeredMemories=${registered}`);
-  expect(registered).toBe(totalPhotos + 2); // 全 photo + audio2（2発火ぶん）
+  expect(registered).toBe(totalPhotos + totalAudio); // 全 photo + 全 audio（発火ぶん）
 
   // --- API で memories 作成を確認（candidates 前は album 未作成なので media 側で確認） ---
   // score 実行前に candidates は 404。まず worker score を回す。

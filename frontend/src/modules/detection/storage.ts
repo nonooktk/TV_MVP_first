@@ -15,9 +15,13 @@ export interface CaptureMetadata {
   rms_db?: number;
   rms_rise?: number;
   face_score?: number;
-  trigger_reason?: "rms" | "stt" | "face";
+  trigger_reason?: "rms" | "stt" | "face" | "centroid";
   lookback?: boolean;
   blendshapes_top?: string[];
+  /** 発火時のスペクトル重心（Hz・改良2）。data-contract.md 付録キー。 */
+  spectral_centroid?: number;
+  /** 発火時の重心の基準比（現在値 / 基準・改良2）。data-contract.md 付録キー。 */
+  centroid_rise_ratio?: number;
   [key: string]: unknown;
 }
 

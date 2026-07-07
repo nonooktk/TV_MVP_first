@@ -132,6 +132,16 @@ class TestBuildCallContext:
         ctx = build_call_context(_jst(9), metas)
         assert ctx.trigger_summary == "表情1回・manual1回"
 
+    def test_trigger_summary_includes_centroid_label(self):
+        """centroid（スペクトル重心トリガー・改良2）→ 声色の変化。表示順は rms→stt→face→centroid。"""
+        metas = [
+            {"trigger_reason": "centroid"},
+            {"trigger_reason": "rms"},
+            {"trigger_reason": "centroid"},
+        ]
+        ctx = build_call_context(_jst(9), metas)
+        assert ctx.trigger_summary == "声の盛り上がり1回・声色の変化2回"
+
     def test_trigger_summary_none_when_absent(self):
         ctx = build_call_context(_jst(9), [{}, {"trigger_reason": ""}])
         assert ctx.trigger_summary is None

@@ -190,8 +190,17 @@ families/{family_id}/calls/{call_id}/
 | `blendshapes_top` | 上位blendshape名 |
 | `stt_text` | 発火前後の認識テキスト |
 | `stt_labels` | 感情ワードヒット |
-| `trigger_reason` | 発火要因（`rms` / `stt` / `face`） |
+| `spectral_centroid` | 発火時のスペクトル重心（Hz・改良2）。声色（明るさ／高さ）の指標。全写真に付与 |
+| `centroid_rise_ratio` | 発火時の重心の基準比（現在値 / 発話中央値・例 1.25＝+25%）。全写真に付与 |
+| `trigger_reason` | 発火要因（`rms` / `stt` / `face` / `centroid`） |
 | `lookback` | look-back（発火前バッファ由来）か否か（bool） |
+
+> `trigger_reason` の `centroid`（スペクトル重心トリガー・改良2）: 音圧が変わらなくても
+> 声色（笑い声・高い声・興奮）で重心が基準比 +20% を 200ms 持続したときの発火。
+> `rms`/`stt` と**共有のクールダウン（4秒）**が適用される。worker は reason で分岐しない
+> （stage1 のスコアリングは per-photo の rms_rise / face_score を使う。ラベリング文脈では
+> `声色の変化` として集計される）。`spectral_centroid` / `centroid_rise_ratio` は発火要因に
+> かかわらず全写真へ付与する（発火時点の重心サンプル）。
 
 ## 6. 変更管理
 

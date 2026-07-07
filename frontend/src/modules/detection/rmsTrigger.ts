@@ -1,10 +1,22 @@
 // 委託コア②（検知キャプチャ）: RMS音圧の発火判定（純粋ロジック）
 //
 // 入力は rms_dB のサンプル列（約50ms間隔）。docs/detection-params.md の初期値に従う。
-//   - baseline: 緩いEMA（τ=3〜5s）。この baseline からの相対上昇（rms_rise）でスコア化する。
+//   - baseline: 「静音区間ベース」で学習する平常レベル（2026-07-07 再設計）。
+//     この baseline からの相対上昇（rms_rise）でスコア化する。
 //   - VADゲート: 無音（簡易閾値未満）では baseline を更新せず発火もしない。
 //   - 持続: 上昇状態が 150〜300ms 続いたら発火とみなす。
 //   - クールダウン: 発火後 3〜5s は次の発火をしない。
+//
+// 【baseline の静音区間ベース再設計（2026-07-07）】
+//   1. 仮初期値: 初回有声サンプルで baseline = min(サンプル値, provisionalBaselineDb=-32)。
+//      自動ゲイン目標 -30dBFS と整合させた仮値。冒頭がいきなり大声でも仮値(-32)を採用するため、
+//      その大声との差（rise）が大きく取れ、冒頭からでも発火できる。冒頭が静かな声ならその値を
+//      採用する（min なので平常側に寄る）。
+//   2. 定常区間のみ学習: rise（現在値 − baseline）が riseThresholdDb 以上の間は EMA 更新を凍結する。
+//      盛り上がり（発話のピーク）を平常基準に取り込まない＝「静かに戻った区間」だけで学習する。
+//   3. 非対称追従: 更新時、baseline が上がる方向は τ=8s（ゆっくり）、下がる方向は τ=2s（速い）。
+//      環境が静かになったら基準を速やかに引き下げ、うるさくなっても基準はゆっくりしか上げない。
+//   ※ 旧「ウォームアップ機構（warmupMs / warmupTauMs）」は本方式に置換して廃止した。
 //
 // このファイルは DOM / WebAudio に一切依存しない純粋ロジック（vitest で単体テストする）。
 // パラメータは 1 つの設定オブジェクトに集約する。
@@ -13,14 +25,74 @@
 // （docs/detection-params.md・CLAUDE.md の開発ルール）。実測での調整は本実装の範囲外とする。
 
 /** 発火要因（data-contract.md 付録 metadata の trigger_reason に対応）。 */
-export type TriggerReason = "rms" | "stt" | "face";
+export type TriggerReason = "rms" | "stt" | "face" | "centroid";
+
+/**
+ * 発話フレームの中央値をローリング窓（直近 windowMs）で保持するヘルパ（2段階化・改良1/2 共通）。
+ *
+ * 用途は2つ:
+ *   - 基準レベルの2段階化（改良1・Phase 2）: 発話フレームの音圧(dB)の中央値を基準にする。
+ *   - スペクトル重心トリガー（改良2）: 発話フレームの重心(Hz)の中央値を基準にする。
+ *
+ * 「発話フレームのみ」を push する前提（呼び出し側でノイズフロア+ゲート判定・盛り上がり除外を行う）。
+ * 窓は (値, 時刻) のペアを保持し、windowMs より古いものを落とす。中央値はソートして中央要素を採る。
+ *
+ * DOM / WebAudio 非依存の純粋ロジック（vitest で単体テストする）。
+ */
+export class RollingMedian {
+  private readonly windowMs: number;
+  private samples: Array<{ v: number; t: number }> = [];
+
+  constructor(windowMs: number) {
+    this.windowMs = windowMs;
+  }
+
+  /** 1サンプル（値・時刻）を追加し、窓外（windowMs より古い）を落とす。 */
+  push(v: number, nowMs: number): void {
+    this.samples.push({ v, t: nowMs });
+    const cutoff = nowMs - this.windowMs;
+    // 先頭から古いものを落とす（時刻は単調増加前提だが、安全側で filter でなく shift ループ）。
+    while (this.samples.length > 0 && this.samples[0].t < cutoff) {
+      this.samples.shift();
+    }
+  }
+
+  /** 現在の窓の中央値。サンプルが無ければ null。 */
+  median(): number | null {
+    if (this.samples.length === 0) return null;
+    const vals = this.samples.map((s) => s.v).sort((a, b) => a - b);
+    const mid = Math.floor(vals.length / 2);
+    if (vals.length % 2 === 1) return vals[mid];
+    return (vals[mid - 1] + vals[mid]) / 2;
+  }
+
+  /** 窓内のサンプル数（デバッグ・テスト用）。 */
+  size(): number {
+    return this.samples.length;
+  }
+}
 
 /** RMS発火判定のパラメータ（支給初期値。チューニングは検収対象外）。 */
 export interface RmsTriggerParams {
   /** サンプル間隔の想定値（ms）。持続・クールダウンの時間換算に使う。 */
   sampleIntervalMs: number;
-  /** baseline EMA の時定数 τ（ms）。緩いEMA=3〜5s の範囲（初期値4s）。 */
-  baselineTauMs: number;
+  /**
+   * baseline の仮初期値（dB・静音区間ベース再設計 2026-07-07）。
+   * 初回有声サンプルで baseline = min(サンプル値, provisionalBaselineDb)。
+   * 自動ゲイン目標 -30dBFS と整合させた値（-32dB）。冒頭が大声でも仮値を採用して
+   * 大きな rise を作り、冒頭からでも発火できるようにする。
+   */
+  provisionalBaselineDb: number;
+  /**
+   * baseline EMA の上昇方向の時定数 τ（ms・非対称追従）。
+   * baseline が上がる方向（環境がうるさくなる）は τ=8s でゆっくり追従する。
+   */
+  baselineTauUpMs: number;
+  /**
+   * baseline EMA の下降方向の時定数 τ（ms・非対称追従）。
+   * baseline が下がる方向（環境が静かになる）は τ=2s で速やかに追従する。
+   */
+  baselineTauDownMs: number;
   /** VADゲートのしきい値（dB）。これ未満は無音とみなし baseline 更新も発火もしない。 */
   vadFloorDb: number;
   /** 発火とみなす baseline からの相対上昇量（dB）。実測で調整（検収対象外）。 */
@@ -29,18 +101,31 @@ export interface RmsTriggerParams {
   sustainMs: number;
   /** 発火後のクールダウン（ms）。3〜5s（初期値4s）。 */
   cooldownMs: number;
+
+  // --- 基準レベルの2段階化（改良1・発話基準）-------------------------------
   /**
-   * baseline ウォームアップの時定数 τ（ms・修正4）。
-   * 通話冒頭の有声サンプル累計が warmupMs に達するまでは baselineTauMs ではなくこの速い
-   * τ で順応させ、基準を数秒で平常側へ引き下げる（コールドスタート緩和）。初期値1s。
+   * 発話とみなすゲート（ノイズフロア + このマージン dB 以上のフレームを発話とみなす）。
+   * ノイズフロア推定は audioPipeline から setNoiseFloorDb で反映される。
+   * 定数 SPEECH_GATE_DB=8（ノイズフロア +8dB 以上を発話とする）。
    */
-  warmupTauMs: number;
+  speechGateDb: number;
   /**
-   * ウォームアップを適用する有声サンプルの累計時間（ms・修正4）。
-   * 「最初の有声3秒間だけ τ=warmupTauMs、その後は通常運転 τ=baselineTauMs」を実現する。
-   * 初期値3s。
+   * Phase 1 → Phase 2 へ切り替える発話累計時間（ms）。
+   * 発話フレームの累計がこの値に達したら「発話基準（中央値）」モードへ移行する。
+   * 定数 SPEECH_ACCUM_MS=5000（5秒）。
    */
-  warmupMs: number;
+  speechAccumMs: number;
+  /**
+   * 発話フレーム音圧の中央値を採るローリング窓（ms）。
+   * 定数 MEDIAN_WINDOW_MS=20000（直近20秒）。
+   */
+  medianWindowMs: number;
+  /**
+   * Phase 2 の基準反映スルーレート（dB/秒）。
+   * 発話中央値が急変しても baseline は 1 秒あたりこの量までしか動かさない（急変防止）。
+   * 定数 BASELINE_SLEW_DB_PER_SEC=1（±1dB/秒）。
+   */
+  baselineSlewDbPerSec: number;
 }
 
 /**
@@ -49,7 +134,11 @@ export interface RmsTriggerParams {
  */
 export const DEFAULT_RMS_PARAMS: RmsTriggerParams = {
   sampleIntervalMs: 50,
-  baselineTauMs: 4000, // τ=4s（3〜5sの中央）
+  // baseline 仮初期値（静音区間ベース再設計 2026-07-07）。自動ゲイン目標 -30dBFS と整合。
+  provisionalBaselineDb: -32,
+  // 非対称追従: 上昇方向はゆっくり（τ=8s）、下降方向は速い（τ=2s）。
+  baselineTauUpMs: 8000, // 上がる方向 τ=8s（うるさくなっても基準はゆっくり上げる）
+  baselineTauDownMs: 2000, // 下がる方向 τ=2s（静かに戻ったら基準を速やかに下げる）
   vadFloorDb: -55, // これ未満は無音（VADゲート・簡易閾値）
   // baseline比 +6dB で「声を張った」とみなす。
   // 2026-07-05 オーナー実測フィードバックにより +8dB → +6dB（発火が渋いため感度UP）。
@@ -58,11 +147,11 @@ export const DEFAULT_RMS_PARAMS: RmsTriggerParams = {
   // 2026-07-05 オーナー実測フィードバックにより 200ms → 150ms。
   sustainMs: 150,
   cooldownMs: 4000, // 3〜5s の中央（据え置き）
-  // ウォームアップ（修正4）: 最初の有声3秒間だけ τ=1s で速く順応させる。
-  // 通話冒頭にいきなり叫んだケースでも、基準が数秒で平常側へ降りてきて、
-  // 追加の発話で発火できるようにする。以降は τ=baselineTauMs(4s) の通常運転。
-  warmupTauMs: 1000, // ウォームアップ中の速い τ=1s
-  warmupMs: 3000, // 有声サンプル累計3秒までウォームアップ
+  // 基準レベルの2段階化（改良1・発話基準）。
+  speechGateDb: 8, // ノイズフロア +8dB 以上を発話とみなす（SPEECH_GATE_DB）
+  speechAccumMs: 5000, // 発話累計5秒で Phase 2（発話基準）へ切替（SPEECH_ACCUM_MS）
+  medianWindowMs: 20000, // 発話フレームの中央値ローリング窓20秒（MEDIAN_WINDOW_MS）
+  baselineSlewDbPerSec: 1, // Phase 2 基準反映スルーレート ±1dB/秒（BASELINE_SLEW_DB_PER_SEC）
 };
 
 /** 発火時に外へ渡す情報（metadata の rms_db / rms_rise / trigger_reason の素） */
@@ -91,10 +180,23 @@ export interface RmsTriggerState {
   /** 現在の VAD 床（dB）。audioPipeline のノイズフロア推定で動的更新される。デバッグ表示用。 */
   vadFloorDb: number;
   /**
-   * baseline ウォームアップ中か（有声サンプル累計が warmupMs 未満＝速い τ で順応中）。
-   * デバッグパネルの warmup 表示用。
+   * baseline 学習が凍結中か（静音区間ベース再設計 2026-07-07）。
+   * 直近の有声サンプルの rise（現在値 − baseline）が riseThresholdDb 以上で、盛り上がりを
+   * 平常基準に取り込まないよう EMA 更新を止めている状態。デバッグパネルの「凍結中」表示用。
    */
-  inWarmup: boolean;
+  frozen: boolean;
+
+  // --- 基準レベルの2段階化（改良1・発話基準）-------------------------------
+  /**
+   * 現在の基準モード（改良1）。
+   * "provisional"=Phase 1（仮初期値 -32・静音区間ベースの EMA 学習）／
+   * "speech"=Phase 2（発話フレーム中央値・スルー制限付き）。
+   */
+  mode: "provisional" | "speech";
+  /** 発話（ノイズフロア+8dB 以上）と判定したフレームの累計時間（ms）。5秒で Phase 2 へ。 */
+  speechAccumMs: number;
+  /** Phase 2 の発話中央値（直近20秒・dB）。窓が空なら null。デバッグ表示用。 */
+  speechMedianDb: number | null;
 }
 
 /**
@@ -106,7 +208,8 @@ export interface RmsTriggerState {
 export class RmsTrigger {
   private readonly p: RmsTriggerParams;
 
-  // baseline（緩いEMA）。無音では更新しない。初期は最初の有声サンプルで確定する。
+  // baseline（静音区間ベースで学習する平常レベル）。無音では更新しない。初期は最初の有声
+  // サンプルで確定する（仮初期値 -32 との min）。以降は定常区間のみ非対称 EMA で追従する。
   private baselineDb: number | null = null;
   // 上昇状態が続いている累積時間（ms）。
   private sustainedMs = 0;
@@ -116,11 +219,43 @@ export class RmsTrigger {
   private lastTimeMs: number | null = null;
   private lastRmsDb: number | null = null;
   private triggerCount = 0;
-  // 有声サンプルの累計時間（ms・修正4）。warmupMs 未満の間だけ速い τ で順応する。
-  private voicedMs = 0;
+  // baseline 学習が凍結中か（静音区間ベース再設計）。直近サンプルの rise が riseThresholdDb
+  // 以上のとき true。盛り上がり区間の値を平常基準に取り込まないよう EMA 更新を止める。
+  private frozen = false;
+
+  // --- 基準レベルの2段階化（改良1・発話基準）--------------------------------
+  // 発話ゲート用のノイズフロア推定（audioPipeline から setNoiseFloorDb で反映）。
+  // 未設定（null）の間は vadFloorDb を発話ゲートの代替に使う（床＝ノイズ+8dB のため等価）。
+  private noiseFloorDb: number | null = null;
+  // 発話（ノイズフロア+speechGateDb 以上）と判定したフレームの累計時間（ms）。
+  private speechAccumMs = 0;
+  // 発話フレーム音圧の中央値ローリング窓（直近 medianWindowMs）。
+  private readonly speechMedian: RollingMedian;
+  // 現在の基準モード（provisional=Phase1 / speech=Phase2）。
+  private mode: "provisional" | "speech" = "provisional";
 
   constructor(params: Partial<RmsTriggerParams> = {}) {
     this.p = { ...DEFAULT_RMS_PARAMS, ...params };
+    this.speechMedian = new RollingMedian(this.p.medianWindowMs);
+  }
+
+  /**
+   * 発話ゲート用のノイズフロア推定を反映する（改良1）。
+   * audioPipeline がノイズフロアを推定して定期的に渡す。発話判定「ノイズ+speechGateDb 以上」に使う。
+   */
+  setNoiseFloorDb(db: number): void {
+    this.noiseFloorDb = db;
+  }
+
+  /**
+   * 発話ゲートのしきい値（dB）。ノイズフロア + speechGateDb。
+   * ノイズフロア未設定の間は vadFloorDb を代替に使う（床＝ノイズ+8dB のため）。
+   */
+  private speechGateThresholdDb(): number {
+    if (this.noiseFloorDb !== null) {
+      return this.noiseFloorDb + this.p.speechGateDb;
+    }
+    return this.p.vadFloorDb;
   }
 
   /**
@@ -158,28 +293,61 @@ export class RmsTrigger {
       return null;
     }
 
-    // --- baseline（緩いEMA）更新: 有声サンプルのみ -----------------------------
+    // --- baseline 更新: 静音区間ベース（2026-07-07 再設計）---------------------
     if (this.baselineDb === null) {
-      // 初回の有声サンプルで baseline を確定（立ち上がりで誤発火しないため）。
-      // ※ この「初回有声サンプル=baseline 確定」の挙動はウォームアップ導入後も維持する。
-      this.baselineDb = rmsDb;
-    } else {
-      // EMA: α = dt / τ（τが大きいほど緩やか）。
-      // 【修正4: baseline ウォームアップ】
-      // 有声サンプルの累計（voicedMs）が warmupMs 未満の間は速い τ=warmupTauMs(1s) で
-      // 順応させ、通話冒頭の高い立ち上がり（いきなり叫ぶ等）から基準を数秒で平常側へ
-      // 引き下げる。累計が warmupMs 以上になったら通常運転 τ=baselineTauMs(4s) に戻す。
+      // 初回の有声サンプルで baseline を確定する。
+      // 【仮初期値】baseline = min(サンプル値, provisionalBaselineDb=-32)。
+      // 冒頭が大声（例 -15dB）でも仮値 -32 を採用 → 大きな rise を作り冒頭から発火できる。
+      // 冒頭が静かな声（例 -40dB）ならその値を採用（min なので平常側に寄る）。
+      this.baselineDb = Math.min(rmsDb, this.p.provisionalBaselineDb);
+    }
+
+    // rise は「現在の baseline」との差で評価する（この後の凍結判定にも使う）。
+    const rise = rmsDb - this.baselineDb;
+
+    // 【定常区間のみ学習】rise が riseThresholdDb 以上の間は EMA 更新を凍結する
+    //（盛り上がりのピークを平常基準に取り込まない）。凍結解除は rise が閾値未満に戻ったとき。
+    this.frozen = rise >= this.p.riseThresholdDb;
+
+    // --- 基準レベルの2段階化（改良1・発話基準）-------------------------------
+    // このサンプルが「発話フレーム」か（ノイズフロア +speechGateDb 以上）。
+    // 発話累計の積算・中央値窓への投入・Phase 2 移行判定に使う。
+    const isSpeech = rmsDb >= this.speechGateThresholdDb();
+    if (isSpeech) {
+      this.speechAccumMs += dt;
+      // rise ≥ 閾値の盛り上がり（発話ピーク）は中央値窓に入れない
+      //（平常の話し声レベルを基準にするため、興奮のピークで基準を吊り上げない）。
+      if (!this.frozen) {
+        this.speechMedian.push(rmsDb, nowMs);
+      }
+    }
+    // Phase 1 → Phase 2 の切替（発話累計が speechAccumMs 到達で speech モードへ）。
+    if (this.mode === "provisional" && this.speechAccumMs >= this.p.speechAccumMs) {
+      this.mode = "speech";
+    }
+
+    if (this.mode === "speech") {
+      // 【Phase 2】基準 = 発話フレームの中央値（直近 medianWindowMs）。
+      // 中央値が急変しても baseline はスルー制限（±baselineSlewDbPerSec/秒）で追従する。
+      const med = this.speechMedian.median();
+      if (med !== null) {
+        const maxStepDb = (this.p.baselineSlewDbPerSec * dt) / 1000;
+        const delta = med - this.baselineDb;
+        const step = Math.max(-maxStepDb, Math.min(maxStepDb, delta));
+        this.baselineDb = this.baselineDb + step;
+      }
+      // 窓は以後も更新し続ける（中央値が最新の発話レベルへ追随する）。
+    } else if (!this.frozen) {
+      // 【Phase 1】静音区間ベースの非対称 EMA（従来どおり）。
+      // baseline が下がる方向（環境が静かになる）は τ=2s で速く、
+      // 上がる方向（うるさくなる）は τ=8s でゆっくり追従する。
       const tau =
-        this.voicedMs < this.p.warmupMs
-          ? this.p.warmupTauMs
-          : this.p.baselineTauMs;
+        rmsDb < this.baselineDb
+          ? this.p.baselineTauDownMs // 下降: 速い（τ=2s）
+          : this.p.baselineTauUpMs; // 上昇: ゆっくり（τ=8s）
       const alpha = Math.min(1, dt / tau);
       this.baselineDb = this.baselineDb + alpha * (rmsDb - this.baselineDb);
     }
-    // 有声サンプルの累計を進める（VADゲート通過後のみここに到達する）。
-    this.voicedMs += dt;
-
-    const rise = rmsDb - this.baselineDb;
 
     // --- 持続カウント: 上昇しきい値を超えている間だけ積算 -----------------------
     if (rise >= this.p.riseThresholdDb) {
@@ -224,7 +392,10 @@ export class RmsTrigger {
       riseDb,
       cooldownRemainingMs: Math.max(0, this.cooldownUntilMs - nowMs),
       vadFloorDb: this.p.vadFloorDb,
-      inWarmup: this.voicedMs < this.p.warmupMs,
+      frozen: this.frozen,
+      mode: this.mode,
+      speechAccumMs: this.speechAccumMs,
+      speechMedianDb: this.speechMedian.median(),
     };
   }
 

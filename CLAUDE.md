@@ -78,6 +78,98 @@ BGM 付きハイライト動画を生成、家族の閲覧 UI と高齢者側の
 
 ## 現在の状態（2026-07-07）
 
+- **検知の3改良（発話基準の2段階化・スペクトル重心トリガー・記録通知の2段階化）実装完了
+  （2026-07-07・frontend 中心＋worker はラベル1語のみ / SWA 反映はユーザー委任）**:
+  - **改良1（基準レベルの2段階化・発話基準／`rmsTrigger.ts`）**: baseline 学習を発話ベースに拡張。
+    - **発話判定**: 「ノイズフロア +8dB 以上（`SPEECH_GATE_DB=8`）」のフレームを発話とみなす
+      （ノイズフロア推定は `audioPipeline`→`rmsTrigger.setNoiseFloorDb`。未設定時は vadFloor で代替）。
+    - **Phase 1（発話累計 <5秒）**: 従来どおり（仮初期値 -32・min 採用・rise≥閾値中は学習凍結・
+      非対称τ8s/2s）。**Phase 2（発話累計 ≥5秒＝`SPEECH_ACCUM_MS=5000` で切替）**: 基準 =
+      **発話フレーム音圧の中央値**（直近20秒ローリング窓 `MEDIAN_WINDOW_MS=20000`。rise≥閾値の
+      盛り上がりフレームは窓に入れない）。反映は**スルー制限 ±1dB/秒（`BASELINE_SLEW_DB_PER_SEC=1`）**
+      で急変させない。以後も窓は更新し続ける。中央値ヘルパ `RollingMedian` を新設（改良2と共用）。
+    - snapshot に `mode`("provisional"|"speech")・`speechAccumMs`・`speechMedianDb` を追加。
+  - **改良2（スペクトル重心トリガー／新 `centroidTrigger.ts`＋`audioPipeline.ts`＋`index.ts`）**:
+    声色（笑い声・高い声・興奮）を音圧と独立の軸で検知。AnalyserNode の周波数データから重心(Hz)を
+    50ms間隔で算出（`spectralCentroidHz` 純粋関数・**発話フレームのみ**）。基準も発話重心の中央値
+    （改良1と同じ20秒窓）。重心が基準比 **+20%（`CENTROID_RISE_RATIO=1.2`）を 200ms
+    （`CENTROID_SUSTAIN_MS=200`）持続**かつ発話中で `handleTrigger` を `reason="centroid"` で発火
+    （**RMS/STT と共有クールダウン4秒**）。`TriggerReason` 型に `"centroid"` を追加。全写真 metadata に
+    `spectral_centroid`（発火時Hz）・`centroid_rise_ratio` を付与（data-contract.md 付録に追記）。
+    **worker/stage1 は変更不要**（reason で分岐しない＝確認済み）。ラベリング文脈のみ
+    `worker/stages/call_context.py` の `_TRIGGER_LABELS` に `centroid→声色の変化` を追加。
+  - **改良3（記録通知の2段階化・即時化／`index.ts`＋`call/page.tsx`）**: `onEvent` を2段階化。
+    **トリガー瞬間**に `{type:"started", reason}`（即時）→ 保存完了時に `{type:"completed",
+    photoCount, hasAudio, ...}`。`call/page.tsx` は started で即バッジフラッシュ＋「📸 思い出を
+    記録中…」表示 → completed で「思い出を記録しました（N）」へ更新（8秒タイムアウトの部分保存でも
+    実枚数に整合）。記録カウント（triggerCount）は completed 基準を維持。forceTrigger・Playwright
+    フックの互換維持（`__detection.state` の互換フィールドは残す）。
+  - **デバッグパネル拡張（`call/page.tsx`）**: 「基準モード（発話基準）」（mode/発話蓄積秒/
+    発話メジアン）・「重心（声色）」（現在値/基準/上昇率/持続）セクションを追加。
+  - **検証**: **vitest 75件**（61→+14: `RollingMedian` 2・Phase 2 発話基準/背景音除外/スルー制限 3・
+    `centroidTrigger` 6・2段階通知/共有クールダウン 3。既存の Phase 1 非対称τテスト2件は
+    `speechAccumMs=∞` で Phase 1 に固定して回帰維持）／**tsc 0 エラー**／**next build 9/9**／
+    **pytest 166→167件**（worker call_context に centroid ラベル1件追加）。
+    **Playwright**（代替ポート 3001/8001・別プロジェクトが 3000/8000 占有のため）:
+    `detection-chain`（フェイク音声上で重心/RMS 自動発火も混じるため busy 落ち着き待ち＋下限検証へ
+    堅牢化。連続 forceTrigger で triggerCount 増加・連写は10枚単位・同期一致を確認）・`call.spec`
+    パス。`prod-face-load` は **`serve out` 配信＋Agora の remoteVideo 確立が代替ポート環境で
+    60s 内に成立せず未達**（MediaPipe ロード検証＝本 spec の主眼は Agora 接続の下流で、
+    今回の検知変更とは無関係）。
+  - **docs 更新**: `detection-params.md`（発話ゲート+8dB・5秒切替・20秒メジアン窓・±1dB/s・
+    重心+20%/200ms＋変更履歴）・`data-contract.md`（`spectral_centroid`/`centroid_rise_ratio`・
+    `trigger_reason` に `centroid`）。
+  - **SWA 反映はユーザー委任**: `out/` に3改良が入ることを grep 確認済み（`spectral_centroid`・
+    `思い出を記録中`・`基準モード`・`声色`）。ただし本開発機は `.env.local` が
+    `.env.production` を上書きするため、素の `next build` は API base が localhost フォールバックに
+    なる（配信すると家族データ隔離が壊れる既知の退行クラス）。**秘匿の絡む `.env.*` は本人操作の
+    ルールに従い、SWA デプロイはユーザーが実施**（`.env.local` を退避 or CLI で
+    `NEXT_PUBLIC_API_BASE_URL`＝クラウド URL を渡して `next build`→`swa deploy`）。backend/worker は
+    無変更（worker はラベル1語のみでイメージ再ビルド不要）。
+
+- **認証デプロイ退行の解消＋家族データ隔離の強化＋baseline 静音区間ベース再設計 完了
+  （2026-07-07・frontend＋backend env / SWA 再デプロイ）**:
+  - **退行の経緯**: 直近の SWA 再デプロイが**ビルド時 env（`NEXT_PUBLIC_GOOGLE_CLIENT_ID`）を
+    付け忘れて**上書きしたため、配信バンドルに Google クライアントID が埋め込まれず、
+    `resolveFamilyToken` が **dev 固定トークン（`dev-fixed-token`）へフォールバック**していた。
+    結果、家族側が全員シード owner の家族に解決され**データ隔離が壊れ**、かつ固定トークンが
+    バンドルに焼き込まれていた（Fable 診断: バンドルに GIS コードあり・クライアントID なし・
+    dev-fixed-token 混入あり）。
+  - **恒久対策（.env.production 方式）**: `frontend/.env.production`（**リポジトリ管理・公開値のみ**）を
+    新設し、`NEXT_PUBLIC_API_BASE_URL`（クラウド API URL）＋`NEXT_PUBLIC_GOOGLE_CLIENT_ID`（公開）を
+    記載。`next build` が自動読込するため**ビルドコマンドでの env 付け忘れ事故を根絶**した
+    （`NEXT_PUBLIC_ENTRA_CLIENT_ID` はアプリ登録到着後に同ファイルへ設定）。`.gitignore` は
+    `.env`/`.env.local`/`.env.*.local` のみ除外＝`.env.production` は追跡される。dev-setup §13-3/§13-8 を
+    「env はファイルから自動」方式に更新。
+  - **dev トークンのバンドル排除**: `auth-stub.ts` の固定値直書きを廃止し
+    `process.env.NEXT_PUBLIC_DEV_TOKEN`（既定空）から取得。**`.env.production` には dev トークンを
+    置かない**ため、Google/Entra 有効ビルドの配信バンドルに固定トークンが焼き込まれない
+    （万一使われても空文字は backend で 401）。ローカル開発は `.env.local` の
+    `NEXT_PUBLIC_DEV_TOKEN=dev-fixed-token` で従来どおり動く。
+  - **クラウド DEV_FAMILY_TOKEN のローテーション**: `ca-tvmvp-api` の secret `family-token` を
+    ランダム値（`secrets.token_urlsafe(24)`）へ更新し**リビジョン再起動で反映**。新値は
+    `backend/cloud.env` の `DEV_FAMILY_TOKEN` に追記（値は非公開）。**旧 `dev-fixed-token` は
+    クラウドで 401（無効化）**。tests/e2e-scenario.md・dev-setup の curl 例を `$FAMILY_TOKEN` 方式へ更新
+    （旧トークン直書きを除去。ローカル既定は従来どおり dev-fixed-token）。
+  - **検証**: 再ビルド→SWA 再デプロイ後、配信バンドル全25チャンクを curl+grep で
+    **(a) Google クライアントID あり (b) dev-fixed-token なし**を確認。API 検証:
+    旧 dev-fixed-token→**401**・新トークン（cloud.env）→**200**・無/空トークン→**401**。
+    トップ index.html は未サインイン時に認証ゲート（「読み込み中…」→サインイン画面。
+    クライアントID 埋め込みで `isGoogleEnabled()`=true）を静的に確認。backend は **env/secret のみ
+    変更＝イメージ再ビルド不要**（restart で反映）。pytest 166 パス（回帰）。
+  - **baseline の静音区間ベース再設計（`rmsTrigger.ts`）**: baseline 学習を全面見直し。
+    ①**仮初期値 `provisionalBaselineDb=-32`（定数化・自動ゲイン -30dBFS と整合）**: 初回有声で
+    baseline=min(サンプル値, -32)＝冒頭が大声でも仮値を採用し大きな rise で即発火可能。
+    ②**定常区間のみ学習**: rise ≥ `riseThresholdDb` の間は **EMA 更新を凍結**（盛り上がりを基準に
+    取り込まない）。③**非対称追従**: 上昇 τ=8s／下降 τ=2s（定数化）。**旧ウォームアップ機構
+    （warmupMs/warmupTauMs・修正4）は廃止**して本方式へ置換。snapshot は `inWarmup` を廃し
+    `frozen`（凍結中）へ差し替え、デバッグパネルは `warmup` 行を `baseline学習`（凍結中/学習中＋
+    非対称τ・仮初期値）へ変更。docs/detection-params.md を新方式で更新（変更履歴つき）。
+  - **検証（検知）**: vitest **rmsTrigger 13件**（冒頭ギャン泣き即発火→凍結→泣き止み追従→再発火・
+    静かな開始の従来ケース回帰・長い興奮後の静音復帰で下降τ=2s の速い降下・仮初期値 min・
+    凍結・非対称τ）を含む**全61件パス**／tsc 0 エラー／`next build`（.env.production 自動読込）9/9。
+    call チャンクに `baseline学習`/`凍結中` が含まれ、旧 `warmup` ラベルが消えたことを配信バンドルで確認。
+
 - **(A) マイク自動ゲインの家族側適用＋(B) デバッグボタン・統合パネル 完了
   （2026-07-07・frontend のみ / SWA 再デプロイ）**:
   - **(A) 家族側にも自動ゲイン**: `agoraCall.ts` の WebAudio 自動ゲインチェーン
@@ -670,12 +762,17 @@ BGM 付きハイライト動画を生成、家族の閲覧 UI と高齢者側の
 
 ### 認証の未完了課題（本番前）
 
-- [ ] 本番リリース前に開発用固定トークン（`DEV_FAMILY_TOKEN` / `dev-fixed-token`）を無効化する
-  （テスト家族限定の裏口。有効化後もクラウドに残しているため、本番前に必ず失効させること）。
+- [~] 開発用固定トークンの扱い（2026-07-07 一部前進）: **クラウドの `DEV_FAMILY_TOKEN` は
+  ランダム値へローテーション済み**（旧 `dev-fixed-token` はクラウドで 401・新値は非公開で
+  `backend/cloud.env`）。**配信バンドルには dev トークンを焼き込まない**構成へ変更済み
+  （`.env.production` に `NEXT_PUBLIC_DEV_TOKEN` を置かない＝バンドル経由の裏口は消滅）。
+  残課題: 本番リリース前にクラウドの裏口トークン自体を**完全に失効**させる（プロバイダ認証のみに
+  する）判断。ローカル既定は従来どおり `dev-fixed-token`。
 - [x] **Google 認証を有効化済み（2026-07-06）**: クラウドの `GOOGLE_CLIENT_ID` /
   `NEXT_PUBLIC_GOOGLE_CLIENT_ID` を設定済み（§13-8(A)）。**実 Google サインインでの疎通確認
   （実サインイン→家族自動作成→別アカウントで分離）はユーザー受入で行う**（対話が要るため委任）。
 - [ ] Entra 用アプリ登録作成後、`ENTRA_CLIENT_ID` / `NEXT_PUBLIC_ENTRA_CLIENT_ID` を設定して Entra を有効化
   （§13-8(B)）。有効化後に実サインインでの疎通確認（トークン検証・自動プロビジョニング）を行う。
-- [ ] `backend/.env.example` / `frontend/.env.example` に `GOOGLE_CLIENT_ID`（空）/
-  `NEXT_PUBLIC_GOOGLE_CLIENT_ID`（空）の行を追記する（環境の権限制約でツールから編集できず未反映）。
+- [x] `backend/.env.example`（`GOOGLE_CLIENT_ID=`／`ENTRA_CLIENT_ID=`）・
+  `frontend/.env.example`（`NEXT_PUBLIC_GOOGLE_CLIENT_ID=`／`NEXT_PUBLIC_ENTRA_CLIENT_ID=`／
+  `NEXT_PUBLIC_DEV_TOKEN=`）に空行を反映済み（2026-07-07）。
