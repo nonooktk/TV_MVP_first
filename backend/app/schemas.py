@@ -157,6 +157,9 @@ class AlbumPhoto(BaseModel):
     thumb_sas_url: str | None = None
     sas_url: str
     captured_at: datetime | None = None
+    # 写真の取得元カメラ（両側連写・Phase 2）。"elder"=高齢者側／"family"=家族側（孫）。
+    # memories.metadata.stream から導出する（過去データ＝未設定は None）。閲覧UIのバッジ用。
+    stream: str | None = None
 
 
 class AlbumResponse(BaseModel):

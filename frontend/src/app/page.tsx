@@ -21,6 +21,12 @@ import {
   isGoogleEnabled,
   isGoogleSignedIn,
 } from "../lib/googleAuth";
+import {
+  deleteMeasurementLog,
+  getMeasurementLog,
+  listMeasurementLogs,
+  type MeasurementLogSummary,
+} from "../modules/detection/measurementLogStorage";
 
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 
@@ -28,6 +34,13 @@ function formatDate(iso: string | null): string {
   if (!iso) return "";
   const d = new Date(iso);
   return `${d.getMonth() + 1}月${d.getDate()}日`;
+}
+
+// 計測ログ一覧の日時表示（月/日 時:分）。
+function formatDateTime(iso: string): string {
+  const d = new Date(iso);
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 export default function HomePage() {
@@ -55,6 +68,67 @@ function HomePageInner() {
   const [linkError, setLinkError] = useState<string | null>(null);
   const [linkLoading, setLinkLoading] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  // 計測ログ（トリガーテスト用・通話終了後の回収導線）: NEXT_PUBLIC_MEASUREMENT_UI=1 のときのみ表示。
+  const measurementUiEnabled = process.env.NEXT_PUBLIC_MEASUREMENT_UI === "1";
+  const [measurementLogs, setMeasurementLogs] = useState<MeasurementLogSummary[]>([]);
+  const [measurementLogsLoading, setMeasurementLogsLoading] = useState(true);
+  const [measurementLogsError, setMeasurementLogsError] = useState<string | null>(null);
+
+  // 計測ログ一覧を読み込む（初回＋削除後の再読込で使う）。
+  async function loadMeasurementLogs(): Promise<void> {
+    try {
+      const items = await listMeasurementLogs();
+      setMeasurementLogs(items);
+      setMeasurementLogsError(null);
+    } catch (e) {
+      setMeasurementLogsError(
+        e instanceof Error ? e.message : "計測ログの取得に失敗しました"
+      );
+    } finally {
+      setMeasurementLogsLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!measurementUiEnabled) {
+      setMeasurementLogsLoading(false);
+      return;
+    }
+    void loadMeasurementLogs();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 「DL」: 指定 call_id の保存済み計測ログJSONをダウンロードする
+  // （通話画面の計測ログDLと同じ Blob+a.download パターン）。
+  async function handleMeasurementLogDownload(callId: string): Promise<void> {
+    try {
+      const rec = await getMeasurementLog(callId);
+      if (!rec) return;
+      const json = JSON.stringify(rec.data, null, 2);
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `measurement-log-${callId}-${Date.now()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch {
+      /* ダウンロード失敗は無視（一覧はそのまま残す） */
+    }
+  }
+
+  // 「削除」: 指定 call_id の計測ログを削除し一覧を再読込する。
+  async function handleMeasurementLogDelete(callId: string): Promise<void> {
+    try {
+      await deleteMeasurementLog(callId);
+      await loadMeasurementLogs();
+    } catch {
+      /* 削除失敗は無視（次回操作で再試行可能） */
+    }
+  }
 
   // サインイン中ユーザーの表示名（ホームに表示＋ログアウト導線）。
   // Google（GIS）はプロフィール名の取得を省き「サインイン中」を出す、Entra は表示名を出す。
@@ -322,6 +396,79 @@ function HomePageInner() {
           アルバムを見る ＞
         </a>
       </section>
+
+      {/* 計測ログ（トリガーテスト用・通話終了後の回収導線）: NEXT_PUBLIC_MEASUREMENT_UI=1 のみ表示。 */}
+      {measurementUiEnabled && (
+        <section className="card" data-testid="measurement-log-section">
+          <h2 style={{ fontSize: 16, marginTop: 0 }}>計測ログ（トリガーテスト用）</h2>
+          {measurementLogsLoading && (
+            <p style={{ fontSize: 13, color: "var(--color-text-muted)" }}>読み込み中…</p>
+          )}
+          {measurementLogsError && (
+            <p style={{ fontSize: 13, color: "var(--color-danger)" }}>{measurementLogsError}</p>
+          )}
+          {!measurementLogsLoading && !measurementLogsError && measurementLogs.length === 0 && (
+            <p style={{ fontSize: 13, color: "var(--color-text-muted)" }}>
+              保存済みの計測ログはありません（通話中は約10秒ごと・通話終了時に自動保存されます）。
+            </p>
+          )}
+          {!measurementLogsLoading && measurementLogs.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {measurementLogs.map((log) => (
+                <div
+                  key={log.callId}
+                  data-testid="measurement-log-row"
+                  style={{
+                    border: "1px solid var(--color-border)",
+                    borderRadius: 10,
+                    padding: "10px 12px",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    gap: 8,
+                  }}
+                >
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, fontSize: 13 }}>
+                      {formatDateTime(log.updatedAt)}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: "var(--color-text-muted)",
+                        overflowWrap: "anywhere",
+                      }}
+                    >
+                      call_id: {log.callId}
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--color-text-muted)" }}>
+                      samples: {log.samples} / events: {log.events}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                    <button
+                      className="btn-secondary"
+                      data-testid="measurement-log-row-download"
+                      style={{ fontSize: 12, padding: "6px 10px" }}
+                      onClick={() => void handleMeasurementLogDownload(log.callId)}
+                    >
+                      DL
+                    </button>
+                    <button
+                      className="btn-secondary"
+                      data-testid="measurement-log-row-delete"
+                      style={{ fontSize: 12, padding: "6px 10px" }}
+                      onClick={() => void handleMeasurementLogDelete(log.callId)}
+                    >
+                      削除
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
 
       <div style={{ textAlign: "center", marginTop: 8 }}>
         <button className="link-plain" style={{ background: "none", border: "none", cursor: "pointer" }} onClick={handleIssueLink}>

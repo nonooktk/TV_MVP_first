@@ -609,6 +609,79 @@ describe("RmsTrigger", () => {
     expect(fired2).toBe(1);
     expect(trig.snapshot(t).triggerCount).toBe(2);
   });
+
+  // --- ノイズゲート（固定 -50dB・2026-07-10 追加）-----------------------------
+
+  describe("ノイズゲート（固定 -50dB）", () => {
+    it("snapshot に noiseGateDb（-50）が現れる", () => {
+      const trig = new RmsTrigger();
+      expect(trig.snapshot(0).noiseGateDb).toBe(-50);
+      expect(DEFAULT_RMS_PARAMS.noiseGateDb).toBe(-50);
+    });
+
+    it("ゲート未満（-50dB未満）は完全な無音として扱われる: baseline学習・発話累計のいずれも止まる", () => {
+      // vadFloorDb を大きく下げ（-90）、ノイズゲート単体の効果を検証する
+      // （vadFloorDb の動的クランプに頼らずとも -50dB 未満には反応しないことの確認）。
+      const trig = new RmsTrigger({ vadFloorDb: -90 });
+      trig.setNoiseFloorDb(-90); // 発話ゲートもノイズゲートより緩めておく
+      let t = 0;
+      feed(trig, -40, 120, 0); // baseline≈-40 を確立
+      t = 120 * DT;
+      const baseBefore = trig.snapshot(t).baselineDb!;
+      const speechAccumBefore = trig.snapshot(t).speechAccumMs;
+
+      // -52dB（ノイズゲート未満）を大量に流す。
+      let fired = 0;
+      for (let i = 0; i < 200; i++) {
+        const ev = trig.push(-52, t);
+        if (ev) fired += 1;
+        t += DT;
+      }
+      expect(fired).toBe(0);
+      expect(trig.snapshot(t).gated).toBe(true);
+      // baseline は不変（ノイズゲート未満は baseline 学習に入らない）。
+      expect(trig.snapshot(t).baselineDb).toBe(baseBefore);
+      // 発話累計も増えない（発話判定は常に false）。
+      expect(trig.snapshot(t).speechAccumMs).toBe(speechAccumBefore);
+    });
+
+    it("ちょうど -50dB はゲート未満ではない（境界・有声として扱われる）", () => {
+      const trig = new RmsTrigger();
+      trig.push(-50, 0);
+      expect(trig.snapshot(50).gated).toBe(false);
+      expect(trig.snapshot(50).baselineDb).not.toBeNull();
+    });
+
+    it("ゲート未満を挟むと持続がリセットされ、armed も復帰する（vadFloorDb より広い保護範囲）", () => {
+      const trig = new RmsTrigger({ vadFloorDb: -90 });
+      let t = 0;
+      feed(trig, -40, 120, 0); // baseline≈-40
+      t = 120 * DT;
+
+      // sustain を積みかける（rise 大）。
+      trig.push(-10, t);
+      t += DT;
+      trig.push(-10, t);
+      t += DT;
+      expect(trig.snapshot(t).sustainedMs).toBeGreaterThan(0);
+      expect(trig.snapshot(t).armed).toBe(true);
+
+      // ノイズゲート未満（-55dB。vadFloorDb=-90 なら本来は有声域）を1サンプル挟む。
+      trig.push(-55, t);
+      t += DT;
+      expect(trig.snapshot(t).gated).toBe(true);
+      expect(trig.snapshot(t).sustainedMs).toBe(0);
+      expect(trig.snapshot(t).armed).toBe(true);
+    });
+
+    it("sample() もゲート状態（gated）を返す", () => {
+      const trig = new RmsTrigger({ vadFloorDb: -90 });
+      trig.push(-40, 0);
+      expect(trig.sample().gated).toBe(false);
+      trig.push(-55, 50);
+      expect(trig.sample().gated).toBe(true);
+    });
+  });
 });
 
 describe("RollingMedian（発話中央値ローリング窓・改良1/2 共通）", () => {

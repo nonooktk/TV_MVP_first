@@ -1,6 +1,8 @@
 // 家族側 VAD 床の自動化（item 12）の単体テスト
 //
-// - AudioPipeline.updateNoiseFloor（ノイズフロア推定→床=ノイズ+8dB・[-70,-45] クランプ）
+// - AudioPipeline.updateNoiseFloor（ノイズフロア推定→床=ノイズ+8dB・[-50,-45] クランプ。
+//   2026-07-10: ノイズゲート（固定 -50dB・rmsTrigger.ts）の追加に伴いクランプ下限を
+//   -70→-50 に変更し、「-50dB 未満には絶対反応しない」ことを二重に保証する）
 // - RmsTrigger.setVadFloorDb（VAD 床の動的更新が発火判定に反映される）
 //
 // updateNoiseFloor は純粋な状態遷移（DOM 非依存）なので、ダミートラックで構築して直接叩く。
@@ -41,21 +43,23 @@ function feed(
 describe("AudioPipeline.updateNoiseFloor（VAD 床の自動化）", () => {
   it("静かな環境ではノイズフロアに追従し 床=ノイズ+8dB を返す", () => {
     const pipe = makePipeline();
-    // -66dBFS 一定の静かな環境。十分なサンプルで EMA が -66 へ収束。
-    const { floors } = feed(pipe, -66, 400);
+    // -54dBFS 一定の静かな環境。十分なサンプルで EMA が -54 へ収束。
+    const { floors } = feed(pipe, -54, 400);
     expect(floors.length).toBeGreaterThan(0);
     const last = floors[floors.length - 1];
-    // ノイズ -66 + margin 8 = -58（[-70,-45] 内なのでクランプなし）。
-    expect(last).toBeCloseTo(-58, 0);
+    // ノイズ -54 + margin 8 = -46（[-50,-45] 内なのでクランプなし）。
+    expect(last).toBeCloseTo(-46, 0);
   });
 
-  it("床は下限 -70dB を下回らない", () => {
+  it("床は下限 -50dB を下回らない（2026-07-10: ノイズゲート固定 -50dB と揃えたクランプ）", () => {
     const pipe = makePipeline();
-    // 極端に静か（-100dBFS）→ ノイズ -100 + 8 = -92 だが下限 -70 でクランプ。
+    // 極端に静か（-100dBFS）→ ノイズ -100 + 8 = -92 だが下限 -50 でクランプ
+    // （ノイズゲート固定 -50dB より下には絶対に反応しないことの二重保証）。
     const { floors } = feed(pipe, -100, 400);
     const last = floors[floors.length - 1];
     expect(last).toBeGreaterThanOrEqual(P.vadFloorMinDb - 1e-6);
     expect(last).toBeCloseTo(P.vadFloorMinDb, 5);
+    expect(P.vadFloorMinDb).toBe(-50);
   });
 
   it("床は上限 -45dB を超えない", () => {

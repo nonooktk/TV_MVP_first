@@ -85,25 +85,31 @@ def _gate_is_applicable(face_scores: list[float]) -> bool:
     return max(face_scores) >= FACE_GATE_THRESHOLD
 
 
-def compute_scores(
+def _stream_of(m: Memory) -> str:
+    """写真候補の取得元ストリーム（両側連写・Phase 2）。
+
+    metadata.stream（"elder"/"family"）を返す。未設定（過去データ）や想定外値は
+    "elder" 扱い（既存データとの後方互換＝声トリガー両側化以前は全て高齢者側映像だった）。
+    """
+    stream = (m.meta_ or {}).get("stream")
+    return stream if stream in ("elder", "family") else "elder"
+
+
+def _compute_scores_single_stream(
     memories: list[Memory],
 ) -> tuple[dict[UUID, float], bool]:
-    """写真候補群のスコアを算出して ({memory_id: score}, gate_applied) を返す。
+    """単一ストリーム内でスコアを算出する（rms_rise 正規化・無表情ゲートはこの群内で完結）。
 
-    純関数・DB非依存。
-
-    - rms_rise は候補内 min-max 正規化（全候補同値なら 0.5）。欠損は 0.0 とみなす。
+    - rms_rise は **この群内** の min-max 正規化（全候補同値なら 0.5）。欠損は 0.0。
     - face_score は metadata から取得（欠損は 0.0）。
     - score = 0.6 * rms_rise正規化 + 0.4 * face_score。
     - 無表情ゲート: face_score < FACE_GATE_THRESHOLD の候補は score を 0 にする。
-      ただし **候補全体の max(face_score) が閾値未満のときはゲートを適用しない**
-      （表情信号が死活のため。音圧のみでランキングする）。返り値の第2要素
-      gate_applied でどちらだったかを呼び出し側へ伝える（観測用）。
+      ただし **この群の max(face_score) が閾値未満のときはゲートを適用しない**
+      （表情信号が死活のため。音圧のみでランキングする）。
     """
     if not memories:
         return {}, False
 
-    # rms_rise を収集（欠損は 0.0）。
     rms_values: dict[UUID, float] = {}
     face_by_id: dict[UUID, float] = {}
     for m in memories:
@@ -117,28 +123,59 @@ def compute_scores(
     rms_max = max(rms_values.values())
     rms_span = rms_max - rms_min
 
-    # ゲート適用可否（候補全体で表情信号が生きているか）。
     gate_applied = _gate_is_applicable(list(face_by_id.values()))
 
     scores: dict[UUID, float] = {}
     for m in memories:
         face_score = face_by_id[m.id]
-
-        # rms_rise 正規化（全候補同値なら 0.5）。
         if rms_span == 0:
             rms_norm = 0.5
         else:
             rms_norm = (rms_values[m.id] - rms_min) / rms_span
-
         score = _W_RMS * rms_norm + _W_FACE * face_score
-
-        # 無表情ゲート: 閾値未満なら 0 にする（ただしゲート適用可のときのみ）。
         if gate_applied and face_score < FACE_GATE_THRESHOLD:
             score = 0.0
-
         scores[m.id] = score
 
     return scores, gate_applied
+
+
+def compute_scores(
+    memories: list[Memory],
+) -> tuple[dict[UUID, float], bool]:
+    """写真候補群のスコアを算出して ({memory_id: score}, gate_applied) を返す。
+
+    純関数・DB非依存。
+
+    【両側連写・Phase 2: ストリーム別ゲート／フォールバック】
+    候補を metadata.stream（"elder"/"family"）でグループ分けし、rms_rise 正規化・無表情
+    ゲート・音圧フォールバックを **ストリーム別に** 適用する。狙いは、高齢者側の写真
+    （顔検知しない＝face_score=0）が、家族側の表情信号が生きていることを理由に無表情ゲートで
+    全滅し、候補が家族側に独占されるのを防ぐこと。ストリーム別にすることで、
+
+      - 高齢者側群: max(face)=0 < 閾値 → ゲート不適用 → 音圧（rms_rise）のみでランキング（全滅しない）。
+      - 家族側群: 表情信号が生きていれば無表情ゲートを適用（従来どおり）。
+
+    となり、両ストリームの候補が非ゼロのスコアで混在して返る（おすすめ上位はスコア順のまま）。
+    返り値の第2要素 gate_applied は観測用で、**いずれかのストリームでゲートを適用したか**
+    （any）を表す。ストリームが実質1つ（既存データ＝全て elder 扱い）のときは従来と同じ挙動。
+    """
+    if not memories:
+        return {}, False
+
+    # ストリーム別にグループ分けする（未設定は elder 扱い）。
+    groups: dict[str, list[Memory]] = {}
+    for m in memories:
+        groups.setdefault(_stream_of(m), []).append(m)
+
+    scores: dict[UUID, float] = {}
+    any_gate_applied = False
+    for stream_memories in groups.values():
+        sub_scores, gate_applied = _compute_scores_single_stream(stream_memories)
+        scores.update(sub_scores)
+        any_gate_applied = any_gate_applied or gate_applied
+
+    return scores, any_gate_applied
 
 
 def run(db: Session, call_id: str, queue, blob=None) -> str | None:

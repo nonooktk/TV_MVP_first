@@ -192,6 +192,85 @@ def test_compute_scores_gate_bypass_when_all_faces_dead():
     assert scores[hi.id] > 0.0
 
 
+def test_compute_scores_stream_gate_isolated():
+    """ストリーム別ゲート（両側連写・Phase 2）: 家族側の表情が生きていても、
+    高齢者側（face_score=0）は無表情ゲートで全滅せず音圧で生き残る。
+
+    従来の全体ゲートだと「家族側の表情が生きている」ことを理由にゲートが全体適用され、
+    face=0 の高齢者側写真がすべて score=0 になり候補が家族側に独占されてしまう。
+    ストリーム別に適用することで高齢者側は音圧のみでランキングされ、両ストリームが
+    非ゼロのスコアで混在する。
+    """
+    class M:
+        def __init__(self, rms, face, stream):
+            self.id = uuid4()
+            self.meta_ = {"rms_rise": rms, "face_score": face, "stream": stream}
+
+    # 高齢者側（顔検知しない＝face_score=0）。音圧に差をつける。
+    e_lo = M(0, 0.0, "elder")
+    e_hi = M(10, 0.0, "elder")
+    # 家族側（表情が生きている）。face<0.1 の f_lo は家族側群内でゲート対象。
+    f_lo = M(10, 0.05, "family")
+    f_hi = M(10, 0.9, "family")
+
+    scores, gate_applied = stage1_scoring.compute_scores([e_lo, e_hi, f_lo, f_hi])
+
+    # 家族側群では表情信号が生きている（max 0.9>=0.1）→ ゲート適用 → any=True。
+    assert gate_applied is True
+    # 高齢者側は face=0 でも群内ではゲート不適用（音圧のみ）→ 音圧最大の e_hi が生き残る
+    #（全体ゲートなら 0 になっていた＝ここが本修正の核心）。
+    assert scores[e_hi.id] > 0.0
+    # 家族側は群内で無表情ゲートが効く（f_lo は 0・f_hi は生き残る）。
+    assert scores[f_lo.id] == 0.0
+    assert scores[f_hi.id] > 0.0
+    # 4枚すべてがスコア dict に含まれる（両ストリーム混在）。
+    assert set(scores.keys()) == {e_lo.id, e_hi.id, f_lo.id, f_hi.id}
+
+
+def test_compute_scores_stream_rms_normalized_within_stream():
+    """rms_rise 正規化はストリーム別（群内 min-max）で行う。
+
+    高齢者側（リモート音声）と家族側（マイク）で音圧スケールが違っても、各群内で
+    0..1 に正規化されるため、片方のスケールが大きいだけで他方が潰れることがない。
+    """
+    class M:
+        def __init__(self, rms, face, stream):
+            self.id = uuid4()
+            self.meta_ = {"rms_rise": rms, "face_score": face, "stream": stream}
+
+    # 高齢者側は 0..2 のレンジ、家族側は 0..100 のレンジ（スケール差）。
+    e_lo = M(0, 0.0, "elder")
+    e_hi = M(2, 0.0, "elder")
+    f_lo = M(0, 0.0, "family")
+    f_hi = M(100, 0.0, "family")
+
+    scores, _ = stage1_scoring.compute_scores([e_lo, e_hi, f_lo, f_hi])
+    # 群内正規化なので、各群の max は rms_norm=1 → score=0.6、min は 0。
+    assert abs(scores[e_hi.id] - 0.6) < 1e-9
+    assert abs(scores[f_hi.id] - 0.6) < 1e-9
+    assert abs(scores[e_lo.id] - 0.0) < 1e-9
+    assert abs(scores[f_lo.id] - 0.0) < 1e-9
+
+
+def test_compute_scores_untagged_stream_treated_as_elder():
+    """stream 未設定（過去データ）は elder 群として扱う（後方互換・単一群と同じ挙動）。"""
+    class M:
+        def __init__(self, rms, face, stream=None):
+            self.id = uuid4()
+            self.meta_ = {"rms_rise": rms, "face_score": face}
+            if stream is not None:
+                self.meta_["stream"] = stream
+
+    # 未設定2枚＋明示 elder1枚は同じ群にまとまる（face 全0 → ゲート不適用→音圧のみ）。
+    a = M(0, 0.0)
+    b = M(10, 0.0)
+    c = M(5, 0.0, "elder")
+    scores, gate_applied = stage1_scoring.compute_scores([a, b, c])
+    assert gate_applied is False  # 単一 elder 群・表情死活 → ゲート不適用
+    # 群内 min-max（0..10）で b が最大、a が最小。
+    assert scores[b.id] > scores[c.id] > scores[a.id]
+
+
 def test_run_creates_album_and_enqueues_auto_confirm(db):
     """run が album を awaiting_selection で作成し auto_confirm を投函する。"""
     call = _make_call(db)

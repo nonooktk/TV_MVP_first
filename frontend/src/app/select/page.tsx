@@ -23,6 +23,18 @@ import FamilyAuthGate from "../../components/FamilyAuthGate";
 
 const REQUIRED_COUNT = 5;
 
+/**
+ * 写真の取得元カメラ（metadata.stream）→ 短いバッジ表示（両側連写・Phase 2）。
+ * "family"=孫（家族側カメラ）／"elder"=祖父母（高齢者側カメラ）。省略時は祖父母扱い。
+ * 返り値 null のときはバッジを出さない（想定外値）。
+ */
+function streamBadge(stream: unknown): { label: string; color: string } | null {
+  if (stream === "family") return { label: "孫", color: "#e8734a" };
+  if (stream === "elder" || stream === undefined || stream === null)
+    return { label: "祖父母", color: "#4a7ae8" };
+  return null;
+}
+
 function formatCountdown(ms: number): string {
   if (ms <= 0) return "まもなく自動確定";
   const totalSec = Math.floor(ms / 1000);
@@ -244,6 +256,7 @@ function SelectPageInner() {
               const order = selectedIds.indexOf(c.id);
               const isSelected = order !== -1;
               const isRecommended = recommendedIds.includes(c.id);
+              const badge = streamBadge(c.metadata?.stream);
               return (
                 <div
                   key={c.id}
@@ -280,6 +293,26 @@ function SelectPageInner() {
                     rank {c.rank}
                     {c.score !== null ? ` / score ${c.score.toFixed(2)}` : ""}
                   </div>
+                  {/* ストリームバッジ（両側連写・Phase 2）: 孫（家族側カメラ）/ 祖父母（高齢者側カメラ）。右上。 */}
+                  {badge && (
+                    <div
+                      data-testid="stream-badge"
+                      style={{
+                        position: "absolute",
+                        bottom: 6,
+                        right: 6,
+                        background: badge.color,
+                        color: "#fff",
+                        fontSize: 10,
+                        fontWeight: 700,
+                        padding: "2px 7px",
+                        borderRadius: 999,
+                        boxShadow: "0 1px 3px rgba(0,0,0,0.35)",
+                      }}
+                    >
+                      {badge.label}
+                    </div>
+                  )}
                   {/* おすすめ（rank 1〜5）バッジ: 視認しやすい小ラベル（左下）。 */}
                   {isRecommended && (
                     <div

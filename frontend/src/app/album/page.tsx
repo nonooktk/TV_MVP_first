@@ -32,6 +32,19 @@ import FamilyAuthGate from "../../components/FamilyAuthGate";
 
 const POLL_INTERVAL_MS = 5000; // generating があるときの一覧ポーリング間隔
 
+/**
+ * 写真の取得元カメラ（stream）→ 短いバッジ（両側連写・Phase 2）。
+ * "family"=孫（家族側カメラ）／"elder"=祖父母（高齢者側カメラ）。過去データ（null/未設定）は
+ * バッジを出さない（null を返す）。
+ */
+function albumStreamBadge(
+  stream?: "elder" | "family" | null
+): { label: string; color: string } | null {
+  if (stream === "family") return { label: "孫", color: "#e8734a" };
+  if (stream === "elder") return { label: "祖父母", color: "#4a7ae8" };
+  return null;
+}
+
 function formatDateHeading(iso: string | null): string {
   if (!iso) return "日付不明";
   const d = new Date(iso);
@@ -379,27 +392,56 @@ function ReadyAlbumBody({
 
       {photos.length > 0 && (
         <div style={{ display: "flex", marginTop: 6, paddingLeft: 4 }}>
-          {photos.map((p, idx) => (
-            <ThumbImage
-              key={p.memory_id}
-              thumbSrc={p.thumb_sas_url}
-              fallbackSrc={p.sas_url}
-              alt={`ベストショット ${idx + 1}`}
-              onClick={() => onPhotoClick(p)}
-              style={{
-                width: 64,
-                height: 64,
-                objectFit: "cover",
-                borderRadius: 8,
-                border: "2px solid #fff",
-                boxShadow: "0 1px 4px rgba(0,0,0,0.25)",
-                marginLeft: idx === 0 ? 0 : -20,
-                zIndex: photos.length - idx,
-                cursor: "pointer",
-                position: "relative",
-              }}
-            />
-          ))}
+          {photos.map((p, idx) => {
+            // ストリームバッジ（両側連写・Phase 2）: 孫（家族側）/ 祖父母（高齢者側）。軽微に。
+            const badge = albumStreamBadge(p.stream);
+            return (
+              <div
+                key={p.memory_id}
+                style={{
+                  position: "relative",
+                  marginLeft: idx === 0 ? 0 : -20,
+                  zIndex: photos.length - idx,
+                }}
+              >
+                <ThumbImage
+                  thumbSrc={p.thumb_sas_url}
+                  fallbackSrc={p.sas_url}
+                  alt={`ベストショット ${idx + 1}`}
+                  onClick={() => onPhotoClick(p)}
+                  style={{
+                    width: 64,
+                    height: 64,
+                    objectFit: "cover",
+                    borderRadius: 8,
+                    border: "2px solid #fff",
+                    boxShadow: "0 1px 4px rgba(0,0,0,0.25)",
+                    cursor: "pointer",
+                    display: "block",
+                  }}
+                />
+                {badge && (
+                  <span
+                    data-testid="album-stream-badge"
+                    style={{
+                      position: "absolute",
+                      bottom: 2,
+                      right: 2,
+                      background: badge.color,
+                      color: "#fff",
+                      fontSize: 9,
+                      fontWeight: 700,
+                      padding: "1px 5px",
+                      borderRadius: 999,
+                      lineHeight: 1.3,
+                    }}
+                  >
+                    {badge.label}
+                  </span>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
 
