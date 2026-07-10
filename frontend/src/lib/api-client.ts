@@ -246,6 +246,9 @@ export interface AlbumPhoto {
   // 原画像（候補）SAS URL
   sas_url: string;
   captured_at: string | null;
+  // 写真の取得元カメラ（両側連写・Phase 2）。"elder"=高齢者側／"family"=家族側（孫）。
+  // 過去データ（未設定）は null。閲覧UIのストリームバッジ用。
+  stream?: "elder" | "family" | null;
 }
 
 export interface Album {

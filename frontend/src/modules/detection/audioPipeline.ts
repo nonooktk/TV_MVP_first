@@ -53,7 +53,12 @@ export interface AudioPipelineParams {
   noiseFloorRiseTauMs: number;
   /** VAD 床 = ノイズフロア + このマージン（dB）。 */
   vadFloorMarginDb: number;
-  /** VAD 床のクランプ下限（dB）。 */
+  /**
+   * VAD 床のクランプ下限（dB）。
+   * 2026-07-10: ノイズゲート（固定 -50dB・rmsTrigger.ts）と揃え、[-70,-45] → [-50,-45] へ変更。
+   * 適応 VAD 床が固定ノイズゲートより下がることが無いようにし、「-50dB 未満には絶対反応しない」
+   * ことを二重に保証する（vadFloorDb 側の変更は補強であり、主たる保証はノイズゲート）。
+   */
   vadFloorMinDb: number;
   /** VAD 床のクランプ上限（dB）。 */
   vadFloorMaxDb: number;
@@ -68,12 +73,13 @@ export const DEFAULT_AUDIO_PARAMS: AudioPipelineParams = {
   // 発火から6秒。postRoll(3s)+timeslice(1s)=4s を通常の到達目標とし、遅延やチャンク
   // 未到達でも6秒で必ず打ち切る（handleTrigger の8s全体タイムアウトより短く設定）。
   maxWaitMs: 6000,
-  // 家族側 VAD 床の自動化（item 12）: ノイズ+8dB・[-70,-45] クランプを1秒ごとに反映。
+  // 家族側 VAD 床の自動化（item 12）: ノイズ+8dB・[-50,-45] クランプを1秒ごとに反映
+  // （2026-07-10: ノイズゲート固定 -50dB と揃えてクランプ下限を -70→-50 に変更）。
   vadFloorUpdateMs: 1000,
   noiseFloorFallTauMs: 1000, // 静かな側へは速く（1s）追従
   noiseFloorRiseTauMs: 8000, // うるさい側へは遅く（8s）追従＝発話で持ち上がらない
   vadFloorMarginDb: 8,
-  vadFloorMinDb: -70,
+  vadFloorMinDb: -50, // 2026-07-10: ノイズゲート（固定 -50dB）と揃えたクランプ下限
   vadFloorMaxDb: -45,
 };
 

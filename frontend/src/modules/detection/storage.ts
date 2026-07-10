@@ -22,6 +22,20 @@ export interface CaptureMetadata {
   spectral_centroid?: number;
   /** 発火時の重心の基準比（現在値 / 基準・改良2）。data-contract.md 付録キー。 */
   centroid_rise_ratio?: number;
+  /**
+   * 発火元（声トリガーの両側化・2026-07-10 追加）。
+   * "elder"=高齢者側リモート音声（既存の唯一の系統）／"family"=家族側ローカルマイク（第2系統）。
+   * 省略時（過去データ）は elder 扱い。data-contract.md 付録キー。
+   */
+  trigger_source?: "elder" | "family";
+  /**
+   * 写真の取得元カメラ（両側連写・Phase 2 追加）。
+   * "elder"=高齢者側リモート映像／"family"=家族側ローカルカメラ（孫が映る側）。
+   * 発火のたびに両ストリームから連写するため、1発火で elder / family 両方の写真が生成される。
+   * 省略時（過去データ）は elder 扱い。data-contract.md 付録キー。
+   * 音声スニペットには付与しない（音声は高齢者側のみ）。
+   */
+  stream?: "elder" | "family";
   [key: string]: unknown;
 }
 

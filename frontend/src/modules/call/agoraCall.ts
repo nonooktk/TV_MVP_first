@@ -105,6 +105,22 @@ export interface StartCallOptions {
     track: MediaStreamTrack,
     uid: number
   ) => void;
+  /**
+   * 声トリガーの両側化（family lane）差し込み口: 自分側（呼び出し元）のローカルマイクの
+   * 生 MediaStreamTrack を渡す。家族側 /call がこれを modules/detection の第2系統
+   * （family lane）に接続する想定（uid に関わらず呼ばれる。使うかどうかは呼び出し側次第）。
+   * 生マイク（自動ゲイン適用前）を渡す＝WebAudio の自動ゲイングラフとは独立の
+   * AnalyserNode を同じトラックに追加接続するだけなので、双方に影響しない。
+   */
+  onLocalAudioTrack?: (track: MediaStreamTrack) => void;
+  /**
+   * 顔検知の家族側化・両側連写（Phase 2）差し込み口: 自分側（呼び出し元）のローカルカメラの
+   * 生 MediaStreamTrack を渡す。家族側 /call がこれを modules/detection の family 映像系統
+   * （facePipeline〈表情スコア／顔トリガー〉＋ family videoRing〈両側連写〉）へ接続する想定。
+   * onLocalAudioTrack と同じく、camTrack を publish するのとは別に MediaStreamTrack を
+   * そのまま渡すだけなので、送信映像・publish には影響しない。
+   */
+  onLocalVideoTrack?: (track: MediaStreamTrack) => void;
 }
 
 /** 通話ハンドル。leave() で退出とリソース解放を行う。 */
@@ -352,6 +368,26 @@ async function doStartCall(opts: StartCallOptions): Promise<CallHandle> {
     [micTrack, camTrack] = await AgoraRTC.createMicrophoneAndCameraTracks(
       micConfig
     );
+
+    // 声トリガーの両側化（family lane）差し込み口: 生マイク（自動ゲイン適用前）を渡す。
+    // 呼び出し側（家族側 /call）が modules/detection の第2系統に接続するかどうかを決める
+    // （best-effort。ここでは渡すだけで検知の成否には関与しない）。
+    try {
+      opts.onLocalAudioTrack?.(micTrack.getMediaStreamTrack());
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn("[call] onLocalAudioTrack コールバックで例外（通話は継続）", e);
+    }
+
+    // 顔検知の家族側化・両側連写（Phase 2）差し込み口: 自分側ローカルカメラの生トラックを渡す。
+    // 家族側 /call が modules/detection の family 映像系統（facePipeline＋family videoRing）へ
+    // 接続する（best-effort。ここでは渡すだけで検知の成否には関与しない）。
+    try {
+      opts.onLocalVideoTrack?.(camTrack.getMediaStreamTrack());
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn("[call] onLocalVideoTrack コールバックで例外（通話は継続）", e);
+    }
 
     await client.join(opts.appId, opts.channel, opts.token, opts.uid);
 

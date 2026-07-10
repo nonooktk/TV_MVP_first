@@ -30,6 +30,14 @@
 //   独立の AND 条件で、クールダウンが明けても声を張ったままなら再発火させない
 //   （鳴りっぱなし・連続再発火の防止）。rise が閾値未満に戻ると armed=true に復帰する。
 //
+// 【ノイズゲート（固定 -50dB・2026-07-10 追加）】
+//   vadFloorDb（動的・家族側は自動追従）とは独立に、常に -50dB を下限とする固定ゲートを
+//   追加する。ゲート未満のフレームは「完全な無音」として扱い、トリガー評価（sustain加算）
+//   をしない・baseline 学習に入れない・発話判定は常に false（speechAccumMs も増えない）に
+//   する。vadFloorDb の自動追従がまだ収束していない通話冒頭や、クランプ変更前の設定値でも
+//   「-50dB 未満には絶対反応しない」ことを保証する目的（家族側のノイズフロア推定に依存しない
+//   固定の安全網）。現在フレームがゲート未満かは snapshot().gated で観測できる。
+//
 // このファイルは DOM / WebAudio に一切依存しない純粋ロジック（vitest で単体テストする）。
 // パラメータは 1 つの設定オブジェクトに集約する。
 //
@@ -108,6 +116,12 @@ export interface RmsTriggerParams {
   /** VADゲートのしきい値（dB）。これ未満は無音とみなし baseline 更新も発火もしない。 */
   vadFloorDb: number;
   /**
+   * ノイズゲート（固定・2026-07-10 追加）。これ未満は vadFloorDb（動的）の値に関わらず
+   * 常に「完全な無音」として扱う（トリガー評価・baseline 学習・発話判定のいずれも行わない）。
+   * 支給初期値 -50dB（固定。チューニングは検収対象外）。
+   */
+  noiseGateDb: number;
+  /**
    * 発火とみなす baseline からの相対上昇量（dB・仮基準=provisional モード時）。
    * まだ baseline が安定していない段階のため、誤発火を避けて高めに設定する。
    * 実測で調整（検収対象外）。2026-07-07: モード依存化に伴い riseThresholdDb を分割。
@@ -162,6 +176,9 @@ export const DEFAULT_RMS_PARAMS: RmsTriggerParams = {
   baselineTauUpMs: 8000, // 上がる方向 τ=8s（うるさくなっても基準はゆっくり上げる）
   baselineTauDownMs: 2000, // 下がる方向 τ=2s（静かに戻ったら基準を速やかに下げる）
   vadFloorDb: -55, // これ未満は無音（VADゲート・簡易閾値）
+  // ノイズゲート（固定 -50dB・2026-07-10 追加）。vadFloorDb の自動追従に関わらず、
+  // これ未満は絶対に「無音」として扱う（固定の安全網）。
+  noiseGateDb: -50,
   // rise 閾値のモード依存化（2026-07-07 実測フィードバック）。
   // 仮基準（provisional）は baseline がまだ安定していないため高め（+24dB）、
   // 発話基準（speech）は baseline が発話中央値に収束済みで信頼できるため低め（+12dB）。
@@ -204,6 +221,13 @@ export interface RmsTriggerState {
   cooldownRemainingMs: number;
   /** 現在の VAD 床（dB）。audioPipeline のノイズフロア推定で動的更新される。デバッグ表示用。 */
   vadFloorDb: number;
+  /** ノイズゲート（固定・2026-07-10 追加）のしきい値（dB）。支給初期値 -50。デバッグ表示用。 */
+  noiseGateDb: number;
+  /**
+   * 現在フレームがノイズゲート未満（完全な無音）か（2026-07-10 追加）。
+   * true の間は baseline 学習・sustain 加算・発話判定のいずれも行わない。デバッグ表示用。
+   */
+  gated: boolean;
   /**
    * baseline 学習が凍結中か（静音区間ベース再設計 2026-07-07）。
    * 直近の有声サンプルの rise（現在値 − baseline）が現行モードの rise 閾値以上で、盛り上がりを
@@ -261,6 +285,8 @@ export class RmsTrigger {
   // リアーム済み（再発火可能）か（2026-07-07 追加）。発火直後は false になり、
   // rise が現行閾値未満に一度戻ると true に復帰する。クールダウンとは独立の AND 条件。
   private armed = true;
+  // 現在フレームがノイズゲート（固定・2026-07-10 追加）未満か。observability 用。
+  private gated = false;
 
   // --- 基準レベルの2段階化（改良1・発話基準）--------------------------------
   // 発話ゲート用のノイズフロア推定（audioPipeline から setNoiseFloorDb で反映）。
@@ -338,10 +364,15 @@ export class RmsTrigger {
     this.lastTimeMs = nowMs;
     this.lastRmsDb = rmsDb;
 
-    // --- VADゲート: 無音は baseline を更新せず、持続もリセットして即 return -------
+    // --- ノイズゲート（固定・2026-07-10 追加）: vadFloorDb の値に関わらず、
+    // これ未満は常に「完全な無音」として扱う（sustain・baseline学習・発話判定のいずれもしない）。
+    this.gated = rmsDb < this.p.noiseGateDb;
+
+    // --- VADゲート（動的）／ノイズゲート（固定）: 無音は baseline を更新せず、
+    // 持続もリセットして即 return -------------------------------------------
     // 無音（rise が評価不能）は「声が収まった」とみなしてリアームする（2026-07-07 追加）。
     // 大声の直後に静寂に戻るケースで、次の有声発話まで再発火不能のまま固まらないようにする。
-    if (rmsDb < this.p.vadFloorDb) {
+    if (this.gated || rmsDb < this.p.vadFloorDb) {
       this.sustainedMs = 0;
       this.armed = true;
       return null;
@@ -461,6 +492,8 @@ export class RmsTrigger {
       riseDb,
       cooldownRemainingMs: Math.max(0, this.cooldownUntilMs - nowMs),
       vadFloorDb: this.p.vadFloorDb,
+      noiseGateDb: this.p.noiseGateDb,
+      gated: this.gated,
       frozen: this.frozen,
       riseThresholdDb: this.currentRiseThresholdDb(),
       armed: this.armed,
@@ -478,15 +511,16 @@ export class RmsTrigger {
    *
    * - rmsDb: 直近サンプルの音圧（dB）。まだサンプルが無ければ null。
    * - rmsRise: baseline からの相対上昇量（dB）。baseline 未確立なら 0。
+   * - gated: 直近サンプルがノイズゲート（固定・2026-07-10 追加）未満だったか。
    *
    * 発火判定（push）とは独立の読み取り専用メソッド（内部状態は変えない）。
    */
-  sample(): { rmsDb: number | null; rmsRise: number } {
+  sample(): { rmsDb: number | null; rmsRise: number; gated: boolean } {
     const rmsDb = this.lastRmsDb;
     let rmsRise = 0;
     if (rmsDb !== null && this.baselineDb !== null) {
       rmsRise = rmsDb - this.baselineDb;
     }
-    return { rmsDb, rmsRise };
+    return { rmsDb, rmsRise, gated: this.gated };
   }
 }

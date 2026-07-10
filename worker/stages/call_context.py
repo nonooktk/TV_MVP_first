@@ -40,12 +40,25 @@ class CallContext:
         stt_labels: 検知した感情ワード（uniq・出現順）。無ければ空タプル。
         trigger_summary: 撮影のきっかけの内訳（例: 声の盛り上がり3回・感情ワード1回）。
             trigger_reason が1件も無ければ None。
+        has_family_trigger: 確定5枚のいずれかが家族側マイク発火
+            （metadata.trigger_source == "family"・声トリガーの両側化・2026-07-10 追加）か。
+            判定ロジック（stage1 のスコアリング等）には一切影響しない、ラベリング文脈のみの
+            軽い反映（build_prompt が「家族側の歓声」の文脈語を1行足すかどうかに使うだけ）。
+        has_face_trigger: 確定5枚のいずれかが顔トリガー発火
+            （metadata.trigger_reason == "face"・顔検知の家族側化 Phase 2）か。
+            build_prompt が「孫の笑顔・変顔」の文脈語を1行足すかに使う（ラベリング文脈のみ）。
+        has_family_stream: 確定5枚に家族側カメラ（孫が映る側）の写真
+            （metadata.stream == "family"・両側連写 Phase 2）が含まれるか。
+            build_prompt が写真の構成（家族側写真が含まれる）を1行足すかに使う。
     """
 
     datetime_label: str
     stt_excerpt: str | None = None
     stt_labels: tuple[str, ...] = ()
     trigger_summary: str | None = None
+    has_family_trigger: bool = False
+    has_face_trigger: bool = False
+    has_family_stream: bool = False
 
 
 def time_of_day_label(dt: datetime) -> str:
@@ -139,6 +152,32 @@ def _collect_trigger_summary(metas: list[dict]) -> str | None:
     return "・".join(parts)
 
 
+def _has_family_trigger(metas: list[dict]) -> bool:
+    """確定5枚のいずれかが家族側マイク発火（metadata.trigger_source == "family"）かを返す。
+
+    声トリガーの両側化（2026-07-10）で追加。判定ロジックは変えず、ラベリング文脈への
+    軽い反映のみに使う。metadata.trigger_source が無い（過去データ）写真は elder 扱いで
+    無視される（True にはならない）。
+    """
+    return any(meta.get("trigger_source") == "family" for meta in metas)
+
+
+def _has_face_trigger(metas: list[dict]) -> bool:
+    """確定5枚のいずれかが顔トリガー発火（metadata.trigger_reason == "face"）かを返す。
+
+    顔検知の家族側化（Phase 2）で追加。判定ロジックは変えず、ラベリング文脈への軽い反映のみ。
+    """
+    return any(meta.get("trigger_reason") == "face" for meta in metas)
+
+
+def _has_family_stream(metas: list[dict]) -> bool:
+    """確定5枚に家族側カメラの写真（metadata.stream == "family"）が含まれるかを返す。
+
+    両側連写（Phase 2）で追加。過去データ（stream 未設定）は elder 扱いで無視される。
+    """
+    return any(meta.get("stream") == "family" for meta in metas)
+
+
 def build_call_context(call_date: datetime, metas: list[dict]) -> CallContext:
     """通話日時と確定写真の metadata 群から CallContext を組み立てる。
 
@@ -151,6 +190,9 @@ def build_call_context(call_date: datetime, metas: list[dict]) -> CallContext:
         stt_excerpt=_collect_stt_excerpt(metas),
         stt_labels=_collect_stt_labels(metas),
         trigger_summary=_collect_trigger_summary(metas),
+        has_family_trigger=_has_family_trigger(metas),
+        has_face_trigger=_has_face_trigger(metas),
+        has_family_stream=_has_family_stream(metas),
     )
 
 
@@ -170,6 +212,22 @@ def build_prompt(context: CallContext) -> str:
         )
     if context.trigger_summary:
         context_lines.append(f"- 撮影のきっかけ: {context.trigger_summary}")
+    if context.has_family_trigger:
+        # 声トリガーの両側化（2026-07-10）: 家族側マイク発火があったことをラベリング文脈へ
+        # 軽く反映する（判定ロジックには影響しない、プロンプトへの1行追加のみ）。
+        context_lines.append(
+            "- 家族側の反応: 家族側の歓声や声の盛り上がりもこの瞬間のきっかけになった"
+        )
+    if context.has_face_trigger:
+        # 顔検知の家族側化（Phase 2）: 顔トリガー発火があったことを文脈へ軽く反映する。
+        context_lines.append(
+            "- 孫の表情: 孫の笑顔・変顔がこの瞬間のきっかけになった"
+        )
+    if context.has_family_stream:
+        # 両側連写（Phase 2）: 家族側カメラの写真も候補に含まれることを文脈へ1行反映する。
+        context_lines.append(
+            "- 写真の構成: 家族（孫）側のカメラで撮れた写真も含まれる"
+        )
 
     return (
         "あなたは家族のフォトアルバムの編集者です。"

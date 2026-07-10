@@ -6,6 +6,8 @@
 - stt_labels の uniq（出現順保持）
 - trigger_reason の内訳集計（rms/stt/face の日本語化・未知値・欠落）
 - build_prompt の行省略（文脈あり/なし）と固定文言
+- trigger_source（声トリガーの両側化・2026-07-10 追加）による has_family_trigger の判定と
+  build_prompt への軽い反映（「家族側の反応」行）
 """
 
 from __future__ import annotations
@@ -146,6 +148,56 @@ class TestBuildCallContext:
         ctx = build_call_context(_jst(9), [{}, {"trigger_reason": ""}])
         assert ctx.trigger_summary is None
 
+    # --- 声トリガーの両側化（trigger_source・2026-07-10 追加）--------------------
+
+    def test_has_family_trigger_true_when_any_photo_is_family(self):
+        """1枚でも trigger_source == "family" があれば True。"""
+        metas = [
+            {"trigger_reason": "rms", "trigger_source": "elder"},
+            {"trigger_reason": "centroid", "trigger_source": "family"},
+        ]
+        ctx = build_call_context(_jst(9), metas)
+        assert ctx.has_family_trigger is True
+
+    def test_has_family_trigger_false_when_all_elder(self):
+        metas = [
+            {"trigger_reason": "rms", "trigger_source": "elder"},
+            {"trigger_reason": "rms", "trigger_source": "elder"},
+        ]
+        ctx = build_call_context(_jst(9), metas)
+        assert ctx.has_family_trigger is False
+
+    def test_has_family_trigger_false_when_absent(self):
+        """trigger_source 未設定（過去データ）は elder 扱いで False のまま。"""
+        metas = [{"trigger_reason": "rms"}, {}]
+        ctx = build_call_context(_jst(9), metas)
+        assert ctx.has_family_trigger is False
+
+    # --- 顔検知の家族側化・両側連写（Phase 2）--------------------------------
+
+    def test_has_face_trigger_true_when_any_photo_is_face(self):
+        """1枚でも trigger_reason == "face" があれば True（顔トリガー・Phase 2）。"""
+        metas = [{"trigger_reason": "rms"}, {"trigger_reason": "face"}]
+        ctx = build_call_context(_jst(9), metas)
+        assert ctx.has_face_trigger is True
+
+    def test_has_face_trigger_false_when_absent(self):
+        metas = [{"trigger_reason": "rms"}, {"trigger_reason": "centroid"}]
+        ctx = build_call_context(_jst(9), metas)
+        assert ctx.has_face_trigger is False
+
+    def test_has_family_stream_true_when_any_photo_is_family(self):
+        """1枚でも stream == "family" があれば True（両側連写・Phase 2）。"""
+        metas = [{"stream": "elder"}, {"stream": "family"}]
+        ctx = build_call_context(_jst(9), metas)
+        assert ctx.has_family_stream is True
+
+    def test_has_family_stream_false_when_absent(self):
+        """stream 未設定（過去データ）は elder 扱いで False のまま。"""
+        metas = [{"stream": "elder"}, {}]
+        ctx = build_call_context(_jst(9), metas)
+        assert ctx.has_family_stream is False
+
 
 # ---------------------------------------------------------------------------
 # プロンプト組み立て（build_prompt）
@@ -172,12 +224,41 @@ class TestBuildPrompt:
         assert '- JSON {"title": "...", "caption": "..."} のみを返す' in prompt
 
     def test_missing_lines_are_omitted(self):
-        """文脈の無い行（会話・感情ワード・きっかけ）はプロンプトから省略される。"""
+        """文脈の無い行（会話・感情ワード・きっかけ・家族側の反応・孫の表情・写真の構成）は省略される。"""
         ctx = CallContext(datetime_label="2026年7月4日・夜")
         prompt = build_prompt(ctx)
         assert "- 通話日時: 2026年7月4日・夜" in prompt
         assert "会話から聞き取れた言葉" not in prompt
         assert "検知した感情ワード" not in prompt
         assert "撮影のきっかけ" not in prompt
+        assert "家族側の反応" not in prompt
+        assert "孫の表情" not in prompt
+        assert "写真の構成" not in prompt
         # 要件ブロックは常にある。
         assert '- JSON {"title": "...", "caption": "..."} のみを返す' in prompt
+
+    def test_face_trigger_note_included_when_present(self):
+        """顔検知の家族側化（Phase 2）: has_face_trigger=True で「孫の笑顔・変顔」行が足される。"""
+        ctx = CallContext(datetime_label="2026年7月4日・夜", has_face_trigger=True)
+        prompt = build_prompt(ctx)
+        assert "- 孫の表情: 孫の笑顔・変顔がこの瞬間のきっかけになった" in prompt
+
+    def test_family_stream_note_included_when_present(self):
+        """両側連写（Phase 2）: has_family_stream=True で写真の構成行が足される。"""
+        ctx = CallContext(datetime_label="2026年7月4日・夜", has_family_stream=True)
+        prompt = build_prompt(ctx)
+        assert "- 写真の構成: 家族（孫）側のカメラで撮れた写真も含まれる" in prompt
+
+    def test_family_trigger_note_included_when_present(self):
+        """声トリガーの両側化（2026-07-10）: has_family_trigger=True で文脈行が1つ足される。"""
+        ctx = CallContext(datetime_label="2026年7月4日・夜", has_family_trigger=True)
+        prompt = build_prompt(ctx)
+        assert (
+            "- 家族側の反応: 家族側の歓声や声の盛り上がりもこの瞬間のきっかけになった"
+            in prompt
+        )
+
+    def test_family_trigger_note_omitted_when_absent(self):
+        ctx = CallContext(datetime_label="2026年7月4日・夜", has_family_trigger=False)
+        prompt = build_prompt(ctx)
+        assert "家族側の反応" not in prompt

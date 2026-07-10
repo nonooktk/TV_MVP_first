@@ -76,6 +76,147 @@ BGM 付きハイライト動画を生成、家族の閲覧 UI と高齢者側の
 - 開発期間は実働2週間。遅延時の削減優先順位は RFP 10章（①映像look-back → ②STTトリガー →
   ③visionキャプション → ④BGM → ⑤着信ポーリング → ⑥高齢者側再生 → ⑦動画生成 の順で削る）
 
+## 現在の状態（2026-07-10）
+
+- **ノイズゲート（固定 -50dB）＋声トリガーの両側化（family lane）実装完了
+  （2026-07-10・frontend＋worker軽微／SWA 再デプロイ済み）**:
+  - **①ノイズゲート（固定 -50dB）**: `rmsTrigger.ts` の `DEFAULT_RMS_PARAMS` に
+    `noiseGateDb: -50` を追加した。`RmsTrigger.push()` は先頭で `gated = rmsDb < noiseGateDb`
+    を判定し、**vadFloorDb（動的・家族側は自動追従）の値に関わらず**ゲート未満は常に
+    「完全な無音」として扱う（既存の VAD ゲート分岐と合流させ、sustain 加算なし・baseline
+    学習に入らない・発話判定は常に false・重心トリガーへも `isSpeech=false` で渡し持続を
+    リセットする、という4点を1つの early return で保証）。あわせて `audioPipeline.ts` の
+    適応 VAD 床クランプを `[-70,-45]` → `[-50,-45]` に変更し、ノイズゲートと下限を揃えて
+    「-50dB 未満には絶対反応しない」ことを二重に保証した。`RmsTriggerState`（snapshot）に
+    `noiseGateDb`／`gated` を追加し、`call/page.tsx` のデバッグパネル（「発火」「パラメータ
+    現在値」セクション）に表示。計測ログ（`measurementLog.ts`）のサンプルに `gate_ratio`
+    （その1秒でゲート未満だったフレーム率）を追加した。**送信音声そのものには一切手を
+    加えていない（聞こえ方は不変）**。
+  - **②声トリガーの両側化（family lane）**: 家族側ローカルマイク音声に第2の検知系統
+    （family lane）を追加した。`index.ts`（`attachDetection`）に `familyRmsTrigger`／
+    `familyCentroidTrigger`／`familyAudioPipeline` を elder レーン（従来の高齢者側リモート
+    音声）とは**完全に別インスタンス**で持ち、baseline・発話累計・ノイズフロア推定・
+    ノイズゲート・リアームのすべてを独立に学習する。`agoraCall.ts` に
+    `onLocalAudioTrack`（join 直後・自動ゲイン適用前の生マイクトラックを渡す差し込み口）を
+    追加し、`call/page.tsx` が `localAudioTrackRef` 経由で `attachDetection` の
+    `familyAudioTrack` へ配線した（elder の video/audio が揃った時点の値をそのまま渡す
+    best-effort。タイミング上ほぼ確実に join 直後の family トラックが先に揃っている）。
+    **STT は高齢者側のみ**（family lane には付けない）。**クールダウンは全系統共有**:
+    `handleTrigger` に `source: "elder" | "family"` 引数を追加したが、共有クールダウン判定
+    （`lastTriggerAtMs` 1本・`passesSharedCooldown`）と `busy` 再入防止は従来どおり
+    関数全体で1つだけなので、elder の rms/centroid/stt と family の rms/centroid の
+    どれが発火しても実装上そのまま横断的に8秒間再発火を抑止する（コード変更は
+    `source` を通知先・スナップショット選択に使うだけで、クールダウン機構自体は拡張不要
+    だった）。発火時の写真連写は**現状どおり高齢者側 video リングから**（両側連写は
+    次フェーズ）。発火イベント・写真 metadata に `trigger_source`（`"elder"`／`"family"`。
+    既存データは elder 扱いのデフォルト）を追加。デバッグパネルに「家族側マイク（第2系統）」
+    セクション（rms/baseline/rise/mode/armed/重心比の現在値）を追加。計測ログのサンプルに
+    `family_rise_peak_db`／`family_centroid_ratio_peak` を追加し、発火イベントに
+    `trigger_source` を記録するよう `measurementLog.recordTriggerStart` に `source` 引数
+    （既定 "elder"）を追加した。家族側系統の初期値は高齢者側と同一（noiseGate 含む）。
+  - **worker（`call_context.py`）**: ラベリング文脈に `has_family_trigger` を追加し、確定5枚の
+    いずれかが `trigger_source == "family"` なら「家族側の歓声や声の盛り上がりもこの瞬間の
+    きっかけになった」という文脈行を1つ足す（stage1 のスコアリング等の判定ロジックは無変更）。
+  - **検証**: vitest **108件**（97→+11: ノイズゲート5件〈rmsTrigger.test.ts〉・family lane
+    独立性/共有クールダウン横断6件〈新規 familyLane.test.ts〉。既存 vadFloor.test.ts の
+    クランプ下限テストを -70→-50 の新仕様へ更新）／tsc 0エラー／`next build` 9/9（配信
+    チャンクに「家族側マイク（第2系統）」「noiseGateDb」「trigger_source」等の新文字列を
+    grep 確認）／**pytest 172件**（165→+7: `test_worker_call_context.py` に
+    `has_family_trigger` の判定3件＋`build_prompt` への反映2件を追加。既存の call_context
+    テストは無変更で回帰確認）。
+  - **docs 更新**: `detection-params.md`（ノイズゲート・家族側系統セクション＋変更履歴・
+    計測ログのフィールド説明更新）／`data-contract.md`（`trigger_source` キー追記。あわせて
+    重心トリガーの共有クールダウン記載を旧「4秒」から現行「8秒」へ修正）。
+  - **SWA 反映**: `docs/dev-setup.md` §13-3 の標準手順で実施（`.env.local` は中身を読まず
+    `mv` で退避 → `.env.production` 自動読込ビルド → SWA CLI デプロイ
+    （デプロイトークンは `az staticwebapp secrets list` から**シェル変数で直接パイプ**し、
+    ファイルには書いていない）→ `.env.local` 復元）。配信中
+    （`gray-dune-0117e4d00.7.azurestaticapps.net`）の `/call` チャンクに「家族側マイク
+    （第2系統）」「noiseGateDb」「trigger_source」「family_rise_peak_db」
+    「family_centroid_ratio_peak」が含まれることを curl+grep で確認（root/call とも 200）。
+    backend/worker はイメージ再ビルド不要（worker の変更はコード1ファイルのみで未デプロイ・
+    次回 worker イメージ更新時に含める想定）。
+  - **判断に迷った点**: family lane のトラック到着タイミング（elder の video/audio 到着時点で
+    family の生マイクトラックが未取得だった場合の扱い）。家族側ローカルマイクは join 直後
+    （相手が「でる」より前）に取得できるため通常は elder 側より確実に先着するが、万一
+    タイミングがずれて未取得のまま attach してしまっても、family lane を諦めて elder
+    レーンのみで検知を継続するだけ（elder 検知・通話自体には影響しない best-effort）とし、
+    attach 後の動的な family トラック追加は次フェーズ扱いとした（現状のタイミングでは
+    発生しにくく、複雑化を避ける判断）。
+
+## 現在の状態（2026-07-08）
+
+- **計測ログのエクスポート機能 実装完了（frontend のみ・ワーキングツリーに変更あり／
+  push はしない）**: トリガーパラメータ設計の実地テストで「全シナリオでの rise / 重心比の
+  分布」と「全発火イベントの詳細」を後から集計できるようにする、読み取り専用オブザーバー。
+  新規 `frontend/src/modules/detection/measurementLog.ts`（`MeasurementLog` クラス。1秒ごとの
+  サマリサンプル＝**その1秒間のピークホールド**〈rise_peak_db・centroid_ratio_peak〉＋現在値
+  〈rms_db/baseline_db/mode/speech_accum_ms/speech_median_db/armed/vad_floor_db/
+  noise_floor_db/speech_ratio/centroid_hz/centroid_baseline_hz/auto_gain_db〉・全発火イベント
+  〈発火瞬間の rmsTrigger/centroidTrigger snapshot 全体＋完了時 photo_count・部分保存
+  partial_save〉。リング上限 samples=3600件／events=200件）。`index.ts` の `onRms`／
+  `onCentroid`／`handleTrigger` から**snapshot 取得と onEvent 相当のタイミングのみ**でフック
+  し、検知本体のロジックには一切書き込まない（読み取り専用）。`attachDetection` の戻り値
+  `DetectionHandle` に `exportMeasurementLog()`／`clearMeasurementLog()`／
+  `measurementLogCounts()` を追加。家族側 `/call` のデバッグパネルに「計測ログDL」
+  （Blob+a.download で `measurement-log-<callId>-<t>.json`）・「ログクリア」ボタンと
+  記録件数（samples/events）の小表示を追加（ボタン表示はパネル限定・記録自体はデバッグ
+  モードに関係なく通話中は常時行う）。検証: vitest **90件**（81→+9: ピークホールド・
+  1Hz間引き・リング上限〈samples/events〉・シリアライズ・イベント記録〈開始→完了の紐付け・
+  複数発火の取り違えなし〉・counts()/clear()）／tsc 0エラー／`next build` 9/9（配信チャンクに
+  「計測ログDL」を grep 確認）。docs/detection-params.md 末尾に「計測ログ」セクション追記。
+  **本番 SWA への反映**: dev-setup.md §13-3 の標準手順（`.env.production` 自動読込ビルド→
+  SWA CLI デプロイ）で実施。
+
+- **ワンタップDL導線＋通話終了後の回収導線 実装完了（2026-07-08・frontend のみ・
+  ワーキングツリーに変更あり／push はしない）**: 上記の計測ログ機能に、①通話中にその場で
+  即ダウンロードできる常設ボタンと、②DLし忘れ・タブクラッシュ対策の IndexedDB 永続化＋
+  ホーム画面からの事後回収を追加した。
+  - **①常設「📊ログ」ボタン**（`app/call/page.tsx`）: 画面左下（右下の既存デバッグトグルと
+    衝突しない位置）に常時表示する小ボタン（`data-testid="measurement-quick-download"`）。
+    デバッグパネル内の既存「計測ログDL」と同じ `handleMeasurementDownload` を共有し、
+    タップで即 Blob ダウンロードする。
+  - **②通話終了後の回収導線**: 新規 `frontend/src/modules/detection/measurementLogStorage.ts`
+    （`idb` パターン。既存 `storage.ts` の `DetectionDB`／`DB_VERSION` には一切触れず、
+    **別DB `tvmvp-measurement-log`** として新設。ストア `logs`〈keyPath=callId〉＋
+    `byUpdatedAt` インデックス）。`index.ts` の `attachDetection` 内に**10秒間隔の
+    setInterval** を追加し `measurementLog.toExport()` を渡してフラッシュ、`detach()` 内でも
+    もう一度確定フラッシュする（検知本体の `onRms`／`onCentroid`／`handleTrigger` の
+    発火判定ロジックは無変更。追加したのはタイマーのセットアップ・クリアと永続化呼び出しのみ）。
+    **設計判断（upsert＝完全スナップショット置き換え。差分追記ではない）**: フラッシュは
+    「その時点の `toExport()` の完全スナップショットで当該 call_id のレコードを丸ごと
+    置き換える」方式にした。10秒間隔フラッシュ×複数回＋終了時確定フラッシュがどの順序で
+    呼ばれても、最後に呼ばれた完全スナップショットが残るため、差分マージに起因する重複・
+    欠落が原理的に起きない（コードコメントに明記・vitest でも逆順呼び出しを検証済み）。
+    保存上限は直近10通話分（`MAX_STORED_CALLS=10`。`updatedAt` 最古から削除）。
+    フラッシュ・保存は best-effort（失敗しても検知・通話を止めない）。
+    家族側ホーム（`app/page.tsx`）に「計測ログ（トリガーテスト用）」セクション
+    （`data-testid="measurement-log-section"`）を追加し、保存済み通話一覧（日時・call_id・
+    samples/events件数）＋各行「DL」「削除」ボタンを表示する。
+  - **表示制御**: ①②とも環境変数 `NEXT_PUBLIC_MEASUREMENT_UI="1"` のときのみ表示
+    （未設定なら非表示。ビルド時に静的埋め込み）。デバッグパネル内の既存ボタンは
+    この環境変数に関係なく従来どおり表示される（変更なし）。
+  - **検証**: vitest **97件**（90→+7: 上限ローテーション・フラッシュのマージ整合性
+    〈10秒フラッシュ→終了確定保存の順／逆順〉・一覧の日時降順・削除。`fake-indexeddb` を
+    devDependencies に導入しテストファイル内に import を閉じ、既存90件への影響なしを確認）／
+    tsc 0エラー／`next build` 9/9（配信チャンクに `measurement-quick-download`・
+    `measurement-log-section`・「計測ログ（トリガーテスト用）」を grep 確認）。
+  - **本番 SWA への反映**: dev-setup.md §13-3 の標準手順で実施（`.env.local` 退避→
+    `.env.production` 自動読込ビルド→SWA CLI デプロイ→`.env.local` 復元）。配信先
+    （`gray-dune-0117e4d00.7.azurestaticapps.net`）の call／home チャンクに新文字列が
+    含まれることを curl+grep で確認済み。
+  - **判断・既知の制約**: `frontend/.env.production` への `NEXT_PUBLIC_MEASUREMENT_UI=1`
+    追記は、本作業環境のツール権限（該当ディレクトリへの Read/Write/Bash cat がいずれも
+    拒否される設定）により実施できなかった。そのため**今回の SWA デプロイでは計測UI
+    （📊ボタン・ホームの回収セクション）は非表示のまま**配信されている（コード自体は
+    配信バンドルに含まれておりロジックは検証済み。値を入れて再ビルド・再デプロイすれば
+    有効化される）。追記が必要な正確な内容は本ファイル末尾の「課題（本番前）」および
+    作業ログ参照。
+  - **課題（本番前）**: **`NEXT_PUBLIC_MEASUREMENT_UI` の無効化（計測UI非表示化）**を
+    本番リリース前に判断する（現状は上記の理由により事実上非表示のまま配信されているが、
+    今後 `.env.production` に値を設定して有効化した場合に備え、本番公開前に空へ戻す
+    判断が必要）。
+
 ## 現在の状態（2026-07-07）
 
 - **検知感度チューニング（実地テストFBの反映・確定 push 済み 271ee45）**:

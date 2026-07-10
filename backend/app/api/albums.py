@@ -174,12 +174,16 @@ def _build_photos(
         # thumb は family_id/call_id/memory_id から導出する
         # （family_id は認証ユーザーの家族＝全アルバム共通。lazy load を避ける）。
         tkey = thumb_key(family_id, mem.call_id, mem.id)
+        # 取得元カメラ（両側連写・Phase 2）。metadata.stream（"elder"/"family"）を素通しする
+        # （未設定＝過去データは None）。閲覧UIのバッジに使う。
+        stream = (mem.meta_ or {}).get("stream")
         photos.append(
             AlbumPhoto(
                 memory_id=mem.id,
                 thumb_sas_url=blob.view_sas_url(tkey),
                 sas_url=blob.view_sas_url(mem.storage_key),
                 captured_at=mem.captured_at,
+                stream=stream if stream in ("elder", "family") else None,
             )
         )
     return photos

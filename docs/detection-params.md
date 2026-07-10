@@ -16,12 +16,17 @@
 | 検知の持続時間（sustainMs） | 150〜300ms（**初期値150ms**） |
 | **クールダウン（cooldownMs）** | **8秒（2026-07-07 実測フィードバックにより 4秒→8秒）／RMS・STT・重心で共有** |
 | **リアーム条件（2026-07-07 追加）** | **発火後は「rise が現行閾値未満に一度戻る」まで再発火しない（armed フラグ・クールダウンと AND）。無音（VADゲート未満）は「声が収まった」とみなしリアームする。重心トリガーにも同様のリアームを適用（基準比が閾値未満に戻るまで再発火しない）** |
-| VADゲート（vadFloorDb） | -55dB（初期値）**／家族側は自動化: ノイズフロア推定 → 床=ノイズ+8dB・[-70,-45] クランプを1秒ごとに反映（`audioPipeline`→`rmsTrigger.setVadFloorDb`）** |
+| VADゲート（vadFloorDb） | -55dB（初期値）**／家族側は自動化: ノイズフロア推定 → 床=ノイズ+8dB・[-50,-45] クランプを1秒ごとに反映（`audioPipeline`→`rmsTrigger.setVadFloorDb`。2026-07-10: ノイズゲート追加に伴いクランプ下限を -70→-50 に変更）** |
+| **ノイズゲート（noiseGateDb・2026-07-10 追加）** | **固定 -50dB。vadFloorDb（動的）の値に関わらず、これ未満は常に「完全な無音」として扱う（トリガー評価・baseline学習・発話判定のいずれも行わない）。「-50dB未満には絶対反応しない」ことの固定の安全網。実装: `rmsTrigger.ts` の `DEFAULT_RMS_PARAMS.noiseGateDb`。snapshot に `noiseGateDb`／`gated`（現在フレームがゲート未満か）を追加しデバッグパネルに表示。送信音声そのものには一切手を加えない（聞こえ方は不変）** |
 | **スペクトル重心トリガー（改良2・2026-07-07 厳密化）** | **AnalyserNode 周波数データから重心(Hz)を50ms間隔で算出（毎フレーム push・発話ゲート成立可否を同時に渡す）。基準=発話重心の中央値（20秒窓・改良1と同じ仕組み。非発話フレームは基準を更新しない）。重心が基準比 +30%（CENTROID_RISE_RATIO=1.3。2026-07-07 実測フィードバックにより +20%→+30%）を 200ms（CENTROID_SUSTAIN_MS=200）持続**かつ発話ゲート成立（現在フレームがノイズフロア+8dB以上）を同時必須**で `trigger_reason="centroid"` を発火（共有クールダウン8秒）。持続カウントは発話フレームのみで積算し、非発話フレームでリセットする（無言時の発火排除）。リアーム: 基準比が閾値未満に戻るまで再発火しない。声色（笑い声・高い声）を音圧と独立の軸で捉える。実装: `centroidTrigger.ts`** |
 | 連写枚数・間隔 | 10枚・約2秒間・200ms間隔 |
 | スニペット範囲 | 検知前2秒＋検知後3秒 |
 | AGC（自動ゲイン制御） | オフ（送信側で設定）**／実装済み（`agoraCall.ts`：高齢者側 join=uid=2 で `AGC:false`。AEC=維持・ANS=既定）** |
 | 自動ゲイン（送信側の発話レベル正規化） | **有効化（`autoGain.ts`：高齢者側 uid=2 のみ）。目標 -30dBFS・有声RMS EMA τ≈3s・更新2秒ごと・スルーレート±2dB/更新・クランプ 0〜+18dB。AGC の代替ではなく“ゆっくり正規化”（相対上昇検知を壊さない）** |
+| **声トリガーの両側化（family lane・2026-07-10 追加）** | **家族側ローカルマイク音声に第2の検知系統（family lane）を追加。rmsTrigger／centroidTrigger／audioPipeline を高齢者側（elder レーン）とは別インスタンスで持ち、baseline・発話累計・ノイズフロア推定・ノイズゲート・リアームのすべてを独立に学習する。初期値は elder レーンと同一（noiseGate 含む）。STT は elder のみ（family lane には付けない）。クールダウンは elder/family 全系統で共有（8秒）。発火時の写真連写は現状どおり高齢者側 video リングから（両側連写は次フェーズ）。発火イベント・写真 metadata に `trigger_source`（"elder"／"family"）を追加（既存データは elder 扱いのデフォルト）。実装: `frontend/src/modules/detection/index.ts`（family lane 配線）・`frontend/src/modules/call/agoraCall.ts`（`onLocalAudioTrack` で家族側ローカルマイクの生トラックを渡す）** |
+| **顔検知の家族側化（Phase 2・2026-07-10 追加）** | **MediaPipe 表情検知（facePipeline）の入力を、高齢者側リモート映像 → **家族側ローカルカメラ**（孫が映る側）に切り替える。MediaPipe インスタンスは従来どおり1つだけ（高齢者側の顔検知はしない＝負荷対策）。face_score 算出ロジック（mouthSmile 系 blendshape 平均）は不変。実装: `frontend/src/modules/detection/index.ts`（facePipeline を family 映像に接続）・`frontend/src/modules/call/agoraCall.ts`（`onLocalVideoTrack` で家族側ローカルカメラの生トラックを渡す）** |
+| **顔トリガー（faceTrigger・Phase 2・2026-07-10 追加）** | **家族側の表情スコア（face_score）が**絶対閾値 `faceTriggerScore=0.7` を `faceSustainMs=300ms` 持続**で発火する（reason="face"・trigger_source="family"）。RMS/重心の「baseline 比」とは異なり**絶対値**で判定する（笑顔の強さそのもの）。**全系統共有クールダウン（8秒・全系統横断）に参加**。リアーム: スコアが閾値未満に一度戻るまで再発火しない。約100ms間隔で facePipeline.score() を読み取り faceTrigger へ投入する。実装: `frontend/src/modules/detection/faceTrigger.ts` の `DEFAULT_FACE_TRIGGER_PARAMS`（`scoreThreshold=0.7`／`sustainMs=300`／`sampleIntervalMs=100`）** |
+| **両側連写（Phase 2・2026-07-10 追加）** | **どのトリガー（rms/stt/centroid/face・elder/family いずれ）でも、発火時に**高齢者側リング＋家族側リングの両方から10枚ずつ（計20枚）連写**する（look-back 込み・2バーストは並列実行）。写真 metadata に `stream`（"elder"／"family"）を付与。家族側の写真には家族側 facePipeline のコマ別 face_score を付与、**高齢者側の写真は face_score=0**（音圧採点＋既存の救済フォールバックで選別）。通知「記録しました（N）」の N は両側合計。8秒全体タイムアウト・部分保存の既存機構は両側分に対して機能する。音声スニペットは従来どおり高齢者側のみ（変更しない）。実装: `index.ts`（family videoRing＋両側 captureBurst＋`toPhotoRecords`）** |
 
 > 実測で調整。チューニングは検収対象外。
 > 実装の正は `frontend/src/modules/detection/rmsTrigger.ts` の `DEFAULT_RMS_PARAMS`
@@ -30,6 +35,72 @@
 ## 初期値の変更履歴
 
 初期値の更新は「支給初期値の改訂」であり、検収条件（機能）は不変。
+
+- **2026-07-10（Phase 2: 顔検知の家族側化・顔トリガー新設・両側連写）**: 実装の正は
+  `faceTrigger.ts`（新規）・`index.ts`・`app/call/agoraCall.ts`・`app/call/page.tsx`・
+  `storage.ts`・`measurementLog.ts`（frontend）／`worker/stages/stage1_scoring.py`・
+  `call_context.py`・`backend/app/api/albums.py`・`backend/app/schemas.py`。
+  - **顔検知の家族側化**: facePipeline（MediaPipe）の入力を高齢者側リモート映像 → 家族側
+    ローカルカメラ（孫が映る側）へ切替。MediaPipe インスタンスは1つだけ（高齢者側の顔検知は
+    しない＝負荷対策）。`agoraCall.ts` に `onLocalVideoTrack`（家族側ローカルカメラの生
+    MediaStreamTrack を渡す差し込み口）を追加し、`call/page.tsx` が `attachDetection` の
+    `familyVideoTrack` へ配線した。
+  - **顔トリガー新設**: 家族側の face_score が**絶対閾値 `faceTriggerScore=0.7` を
+    `faceSustainMs=300ms` 持続**で発火する（reason="face"・trigger_source="family"）。
+    全系統共有クールダウン（8秒）に参加（`handleTrigger` の `isRealTrigger` に "face" を
+    含めた）。リアーム: スコアが閾値未満に一度戻るまで再発火しない。デバッグパネルに
+    「顔トリガー（家族側）」セクション（現在スコア/閾値/持続/armed）を追加。計測ログの
+    サンプルに `face_score_peak`（この1秒間の face_score ピーク）を追加した。
+  - **両側連写**: 発火時に高齢者側リング＋家族側リング（新設 family videoRing）の両方から
+    10枚ずつ（計20枚・look-back 込み・2バースト並列）連写する。写真 metadata に
+    `stream`（"elder"／"family"）を付与。家族側写真は facePipeline のコマ別 face_score、
+    高齢者側写真は face_score=0（音圧採点＋救済フォールバックで選別）。通知の N は両側合計。
+    8秒全体タイムアウト・部分保存の既存機構は両側分に対して機能する。音声スニペットは
+    従来どおり高齢者側のみ（不変）。
+  - **worker**: `stage1_scoring.py` の無表情ゲート／フォールバック／rms_rise 正規化を
+    **ストリーム別**に適用（高齢者側 face=0 が家族側の表情信号を理由に全滅→独占されるのを
+    防ぐ。両ストリームが非ゼロで混在）。`call_context.py` に reason="face" の文脈語
+    「孫の笑顔・変顔」と、家族側写真を含む旨の構成行を追加（判定ロジックは無変更）。
+  - **backend**: `metadata.stream` はフリー dict のため `media/register` は素通し（変更不要）。
+    アルバム閲覧のバッジ用に `AlbumPhoto.stream` を追加し `albums.py` で metadata から導出。
+  - 検収条件（機能）は不変。連写「片側10枚」・スニペット範囲（前2秒〜後3秒）・共有
+    クールダウン（8秒）・sustainMs（150ms/200ms）・重心閾値（+30%/200ms）は据え置き。
+
+- **2026-07-10（ノイズゲート追加・声トリガーの両側化）**: 実装の正は `rmsTrigger.ts`・
+  `audioPipeline.ts`・`centroidTrigger.ts`・`index.ts`・`app/call/agoraCall.ts`・
+  `app/call/page.tsx`・`storage.ts`（frontend）／`worker/stages/call_context.py`。
+  - **ノイズゲート（固定 -50dB・`noiseGateDb`）を追加**: `DEFAULT_RMS_PARAMS` に
+    `noiseGateDb: -50` を追加した。ゲート未満のフレームは vadFloorDb（動的・家族側は
+    ノイズフロア推定で自動追従）の値に関わらず常に「完全な無音」として扱う（トリガー評価・
+    baseline学習・発話判定のいずれも行わない・重心トリガーへも isSpeech=false で渡し持続を
+    リセットする）。**適応 VAD 床のクランプを `[-70,-45]` → `[-50,-45]` に変更**し、
+    ノイズゲートと揃えて「-50dB 未満には絶対反応しない」ことを二重に保証した。
+    snapshot に `noiseGateDb`／`gated`（現在フレームがゲート未満か）を追加し、デバッグパネルの
+    「発火」「パラメータ現在値」セクションに表示した。計測ログのサンプルに `gate_ratio`
+    （その1秒でゲート未満だったフレーム率）を追加した。**送信音声そのものには一切手を
+    加えていない（聞こえ方は不変）**。
+  - **声トリガーの両側化（family lane）**: 家族側ローカルマイク音声に第2の検知系統
+    （family lane）を追加した（`RmsTrigger`／`CentroidTrigger`／`AudioPipeline` を高齢者側
+    〈elder レーン〉とは別インスタンスで保持。baseline・発話累計・ノイズフロア推定・
+    ノイズゲート・リアームのすべてを独立に学習する）。`agoraCall.ts` に
+    `onLocalAudioTrack`（家族側ローカルマイクの生 MediaStreamTrack を渡す差し込み口）を追加し、
+    `call/page.tsx` がこれを `attachDetection` の `familyAudioTrack` へ配線した。**STT は
+    高齢者側のみ**（family lane には付けない）。**クールダウンは全系統共有**（elder の
+    rms/centroid/stt ＋ family の rms/centroid のどれが発火しても8秒間は全体で再発火しない。
+    `handleTrigger` の `lastTriggerAtMs` 1本を elder/family 共通で参照する既存の仕組みを
+    そのまま横断適用）。発火時の写真連写は**現状どおり高齢者側 video リングから**（両側連写は
+    次フェーズ）。発火イベント・写真 metadata に `trigger_source`（`"elder"`／`"family"`）を
+    追加した（既存データは elder 扱いのデフォルト。`docs/data-contract.md` に追記）。
+    デバッグパネルに「家族側マイク（第2系統）」セクション（rms/baseline/rise/mode/armed/
+    重心比の現在値）を追加した。計測ログのサンプルに `family_rise_peak_db`／
+    `family_centroid_ratio_peak` を追加し、発火イベントに `trigger_source` を記録した。
+    家族側系統の初期値は高齢者側と同一（noiseGate 含む）。
+  - **worker（`call_context.py`）**: ラベリング文脈に `has_family_trigger` を追加し、確定5枚の
+    いずれかが `trigger_source == "family"` なら「家族側の歓声や声の盛り上がりもこの瞬間の
+    きっかけになった」という文脈行を1つ足す（判定ロジック・スコアリングは無変更。ラベリング
+    文脈への軽い反映のみ）。
+  - 検収条件（機能）は不変。連写10枚・スニペット範囲（前2秒〜後3秒）・sustainMs（150ms/200ms）・
+    クールダウン（8秒）・重心閾値（+30%/200ms）は据え置き。
 
 - **2026-07-07（実測フィードバックによる調整: rise閾値のモード依存化・クールダウン延長・
   リアーム条件・重心トリガーの厳密化）**: オーナーの実測フィードバック（発火しすぎ・鳴りっぱなし・
@@ -137,6 +208,81 @@
     上昇 τ=8s の非対称 EMA**）して、**床＝ノイズ+8dB・[-70,-45] クランプ**を1秒ごとに反映する。
     静かな環境では床が下がって発火しやすく、うるさい環境では床が上がって誤発火を抑える。
     家族側 `?debug=1` パネルに `vadFloor` を追加。
+
+## 計測ログ（トリガーパラメータ設計の実地テスト用）
+
+実地テストで「全シナリオでの rise / 重心比の分布」と「全発火イベントの詳細」を後から集計
+できるようにするための、読み取り専用オブザーバー。検知本体（`rmsTrigger.ts`／
+`centroidTrigger.ts`／`index.ts`）の挙動には一切影響しない（フックは snapshot 取得と発火
+`onEvent` 経由のみ）。実装は `frontend/src/modules/detection/measurementLog.ts`。
+
+- **記録タイミング**: 通話中は常時記録する（デバッグパネルの表示可否とは無関係）。
+  1秒ごとのサマリサンプルと、全発火イベントの詳細を蓄積する。
+- **サマリサンプル（1秒ごと）**: 瞬間値ではなく**その1秒間のピークホールド**を含める
+  （sustain 150ms の短いイベントを1Hzサンプリングで取りこぼさないため）。フィールド:
+  `t`（通話開始からの秒）・`rise_peak_db`（この1秒間の rise 最大値）・`rms_db`／
+  `baseline_db`／`mode`／`speech_accum_ms`／`speech_median_db`（現在値）・`armed`・
+  `vad_floor_db`・`noise_floor_db`・`speech_ratio`（この1秒間の発話フレーム率 0〜1）・
+  `centroid_hz`／`centroid_baseline_hz`（現在値）・`centroid_ratio_peak`（この1秒間の基準比
+  最大値）・`auto_gain_db`（自ゲイン現在値。取得できる場合のみ）・`gate_ratio`（この1秒間で
+  ノイズゲート未満だったフレーム率 0〜1。2026-07-10 追加・elder レーンの観測）・
+  `family_rise_peak_db`／`family_centroid_ratio_peak`（family lane のこの1秒間のピーク値。
+  2026-07-10 追加。family lane 未接続の通話では常に null）・`face_score_peak`（家族側の
+  face_score のこの1秒間のピーク。顔トリガー・Phase 2・2026-07-10 追加。顔検知なしの通話では
+  常に null）。
+- **発火イベント**: `t`・`type:"trigger"`・`reason`（rms/centroid/stt/force）・
+  `source`（`"elder"`／`"family"`。声トリガーの両側化・2026-07-10 追加。省略呼び出しは
+  `"elder"` 既定）・発火瞬間の全スナップショット（rise・mode・centroid比・armed 等を含む
+  発火元レーンの rmsTrigger/centroidTrigger の `snapshot()` そのもの）・完了時に確定する
+  `photo_count`・部分保存（タイムアウト救済）フラグ `partial_save`。
+- **メモリ上限**: サンプルは最大 3600 件（60分相当・1Hz）、イベントは最大 200 件のリング
+  バッファ（古いものから溢れる）。
+- **エクスポート形式（JSON）**: `version`（1）・`call_id`・`exported_at`（ISO8601）・
+  `params`（有効だった `DEFAULT_RMS_PARAMS`／`DEFAULT_CENTROID_PARAMS` のスナップショット）・
+  `samples`・`events`。
+- **UI**: 家族側 `/call` のデバッグパネル内に「計測ログDL」（Blob+a.download で
+  `measurement-log-<callId>-<t>.json` をダウンロード）・「ログクリア」ボタンと、現在の
+  記録件数（samples/events）の小表示を追加。ボタン表示はデバッグパネル限定（記録自体は
+  デバッグモードに関係なく常時行う）。
+
+### ワンタップDL導線・通話終了後の回収導線（2026-07-08 追加）
+
+実地テストでのログ回収の手間を減らすため、①通話画面の常設DLボタンと②通話終了後・
+タブクラッシュ時にも回収できる IndexedDB 永続化＋ホーム画面からのDLを追加した。
+実装は `frontend/src/modules/detection/measurementLogStorage.ts`（永続化層）・
+`index.ts`（フラッシュタイマー）・`app/call/page.tsx`（常設ボタン）・
+`app/page.tsx`（ホームの回収セクション）。
+
+- **①常設「📊ログ」ボタン**: 家族側 `/call` の画面左下（既存のデバッグトグルは右下のため
+  衝突しない）に常時表示する小さなボタン（`data-testid="measurement-quick-download"`）。
+  タップで `exportMeasurementLog()` を即 Blob ダウンロードする（デバッグパネル内の
+  「計測ログDL」と同じ `handleMeasurementDownload` を共有）。
+- **②通話終了後の回収導線（IndexedDB永続化）**:
+  - **保存タイミング**: (a) 通話中は約10秒ごとに自動フラッシュ、(b) 通話終了時
+    （`detach()` 内）に確定フラッシュ。タブクラッシュ・切り忘れでも直近の状態を失わない。
+  - **設計判断（upsert＝完全スナップショット置き換え。差分追記ではない）**: フラッシュは
+    「その時点の `MeasurementLog.toExport()` の完全スナップショットで、当該 call_id の
+    レコードを丸ごと置き換える」方式にした。10秒間隔の複数回フラッシュ＋終了時の確定保存が
+    どの順序で呼ばれても、常に「最後に呼ばれた時点の完全な状態」が残るため、差分マージに
+    起因する重複・欠落が原理的に発生しない（`measurementLogStorage.ts` にコメントで明記）。
+  - **保存先**: 新規 IndexedDB（`tvmvp-measurement-log`。既存の検知保存 `tvmvp-detection`
+    とは別DB・別ファイル。`storage.ts` の `DetectionDB` には一切手を加えていない）。
+    ストア `logs`（keyPath=`callId`）＋ `byUpdatedAt` インデックス。
+  - **保存上限**: 直近10通話分（`MAX_STORED_CALLS=10`）。call_id ごとに1レコード。
+    上限を超えたら `updatedAt`（直近フラッシュ時刻）が最も古いものから削除する。
+  - **best-effort**: フラッシュ失敗は検知・通話を止めない（try/catch + console.warn のみ）。
+  - **ホーム画面の回収UI**: 家族側ホーム（`/`）に「計測ログ（トリガーテスト用）」セクションを
+    追加（`data-testid="measurement-log-section"`）。保存済み通話の一覧（日時・call_id・
+    samples/events件数）＋各行に「DL」「削除」ボタン。ダウンロードファイル名は既存と同じ
+    `measurement-log-<callId>-<t>.json`（t はダウンロード時刻）。
+- **表示制御**: ①②とも環境変数 `NEXT_PUBLIC_MEASUREMENT_UI` が `"1"` のときのみ表示
+  （未設定なら非表示）。Next.js 静的エクスポートのビルド時に埋め込まれる
+  （`frontend/.env.production` に設定）。デバッグパネル内の既存「計測ログDL」「ログクリア」は
+  この環境変数に関係なくデバッグパネル表示中は常に見える（変更なし）。
+- **検証**: 新規 `tests-unit/measurementLogStorage.test.ts`（上限ローテーション・
+  フラッシュのマージ整合性〈10秒フラッシュ→終了確定保存の順／逆順〉・一覧の日時降順・削除）。
+  `fake-indexeddb` を devDependencies に導入（テストファイル内に import を閉じ、他のテストへの
+  影響なし）。
 
 ## 感情ワード辞書（STT・削減ラダー②解除）
 

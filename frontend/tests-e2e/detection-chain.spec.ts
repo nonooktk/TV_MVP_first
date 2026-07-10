@@ -245,9 +245,11 @@ test("M2 フルチェーン: 発火→IndexedDB→同期→候補→選択→動
   expect(afterSecond.triggerCount).toBeGreaterThan(afterFirst.triggerCount);
 
   // --- IndexedDB に「複数バースト分の連写＋look-backコマ」の photo と audio が入る ----
-  // 連写(lookback=false)は 10枚×発火回数（自動発火が混じると 20 以上）、
-  // look-back(lookback=true)を各発火で含み、音声スニペットも発火ぶん入ることを確認する
-  //（RFP12 コア②: 連写10枚＋発火前のコマ）。厳密数は自動発火で揺れるため下限で検証する。
+  // 両側連写（Phase 2）: 1発火で高齢者側＋家族側の両方から10枚ずつ（片側10枚単位）。
+  // 連写(lookback=false)は「片側10枚 × ストリーム数（1〜2）× 発火回数」＝常に10枚単位で積まれる
+  //（家族側カメラが未確立なら高齢者側のみ10枚単位）。look-back(lookback=true)を各発火で含み、
+  // 音声スニペットも発火ぶん入る（音声は高齢者側のみ・不変）ことを確認する
+  //（RFP12 コア②: 連写10枚＋発火前のコマ）。厳密数は自動発火・ストリーム数で揺れるため下限で検証する。
   const counts = await pageFamily.evaluate(async (cid) => {
     const db: IDBDatabase = await new Promise((resolve, reject) => {
       const req = indexedDB.open("tvmvp-detection", 1);
@@ -273,8 +275,8 @@ test("M2 フルチェーン: 発火→IndexedDB→同期→候補→選択→動
   console.log(
     `IndexedDB: photos=${counts.total}（連写${counts.burst}＋look-back${counts.lookback}） audio=${counts.audio}`
   );
-  expect(counts.burst).toBeGreaterThanOrEqual(20); // 連写10枚 × 2発火以上（自動発火で増える）
-  expect(counts.burst % 10).toBe(0); // 連写は必ず10枚単位で積まれる
+  expect(counts.burst).toBeGreaterThanOrEqual(20); // 連写: 片側10枚 × 発火・ストリーム分（2発火以上）
+  expect(counts.burst % 10).toBe(0); // 連写は必ず片側10枚単位で積まれる（両側連写でも10の倍数）
   expect(counts.lookback).toBeGreaterThanOrEqual(2); // look-back（発火前コマ）を各発火で含む
   expect(counts.audio).toBeGreaterThanOrEqual(2); // 音声スニペット 2件以上（発火ぶん）
   const totalPhotos = counts.total;
