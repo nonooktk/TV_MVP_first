@@ -76,7 +76,69 @@ BGM 付きハイライト動画を生成、家族の閲覧 UI と高齢者側の
 - 開発期間は実働2週間。遅延時の削減優先順位は RFP 10章（①映像look-back → ②STTトリガー →
   ③visionキャプション → ④BGM → ⑤着信ポーリング → ⑥高齢者側再生 → ⑦動画生成 の順で削る）
 
+## 現在の状態（2026-07-18）
+
+- **検知トリガーの再構成（Phase A・Round 1 実測に基づく設計見直し／frontend のみ・
+  ローカルビルド検証まで＝SWA/コンテナ未デプロイ）**: 実地テスト Round 1（3セッション・
+  231発火）の分析で判明した①重心=誤発火78%・通常発話の92%の時間で閾値1.3超過（特徴量として
+  不成立）②RMS発話基準+12dBが低すぎ③顔絶対値0.7は普通の笑顔で超える、を受けて再構成した。
+  実装の正は `frontend/src/modules/detection/`（rmsTrigger.ts／centroidTrigger.ts／
+  faceTrigger.ts／index.ts／measurementLog.ts）＋`app/call/page.tsx`。
+  - **①重心トリガーの停止（既定 enabled=false・計測は継続）**: `DEFAULT_CENTROID_PARAMS` に
+    `enabled: false` を追加し発火経路を既定無効化（`push` は中央値窓・sample()/snapshot() を
+    従来どおり更新するが、発火イベントを一切返さない＝計測は継続）。パラメータで再有効化可能。
+    計測ログのサンプルに `centroid_ratio_median`（その1秒の基準比の中央値＝平滑値。ピークと
+    併記）を追加（Phase B で平滑重心の識別可能性を検証する材料）。デバッグパネルの重心セクション
+    に「停止中（計測のみ）」表示を追加。
+  - **②RMS 閾値の引き上げ**: `riseThresholdSpeechDb` 12→**20**／`riseThresholdProvisionalDb`
+    24→**26**（elder・family 両系統＝DEFAULT_RMS_PARAMS 共有）。
+  - **③スパイク棄却（発火確認窓 `confirmWindowMs=150`）**: sustain 成立後、即発火せず150msの
+    確認窓を張り、その間に非発話（ノイズゲート割れ or VAD床割れ）へ落ちたら破裂音（咳・くしゃみ・
+    生活音）とみなして発火を破棄する。発火は最大150ms遅れるが look-back リングで写真は
+    取りこぼさない（設計意図をコードコメントに明記）。破棄は `snapshot().spikeRejectedCount`／
+    計測ログの `spike_rejected` イベント（elder/family 別 source）に記録（C1台本の効果測定用）。
+    `confirmWindowMs<=0` で従来どおり即発火（後方互換）。
+  - **④顔トリガーの「変化」化**: 絶対値0.7×300ms → `score>=0.85`（絶対）**かつ**
+    `score-baseline>=0.4`（本人ベースライン比の上昇。ベースライン=顔スコアの直近10秒ローリング
+    中央値・既存 RollingMedian 流用）を **500ms 持続**（`faceTriggerScore=0.85`／
+    `faceRiseDelta=0.4`／`faceSustainMs=500`／`faceBaselineWindowMs=10000`）。無表情→笑顔の
+    「変化」で発火し、ずっと笑顔（変化なし）では発火しない。リアームは既存踏襲（0.85未満に戻るまで）。
+    計測ログに `face_baseline`（本人ベースラインの1秒毎の現在値）を追加。
+  - **⑤シナリオマーカー**: 計測UI（`NEXT_PUBLIC_MEASUREMENT_UI=1` 時のみ）に打刻UI（セレクト
+    A1〜A7・B1〜B8・C1〜C3・自由入力＋「打刻」ボタン）を追加。押すと計測ログの events に
+    `{type:"marker", label, t}` を記録する（Round 2 の集計自動化）。既存📊ボタンの近く（左下）に
+    通話の邪魔にならない小ささで配置。`DetectionHandle.recordMarker(label)` を新設。
+  - **検証**: vitest **136件**（126→+10: rmsTrigger スパイク棄却5・centroidTrigger 既定停止3・
+    measurementLog（centroid_ratio_median／face_baseline／spike_rejected／marker／リング）5。
+    既存の旧閾値参照〈provisional 24→26・speech 12→20〉・確認窓ぶんのサンプル数・顔トリガーの
+    「変化」条件・重心 enabled=true 明示は新仕様へ更新。既存テストの dummy RmsTriggerState /
+    events union も追随修正）／**tsc 0エラー**／**next build 9/9**。
+  - **判断に迷った点**: (a) 確認窓の発火は「保留していた sustain 成立時点の値（rmsDb/rise/
+    baseline）」で行い、現在フレーム値では発火しない（写真は look-back で過去に遡るため peak
+    時点の metadata を残すのが自然）。(b) 重心停止は `push` の firing ブロックだけを
+    `enabled &&` で塞ぎ、sustainedMs のリセットもしない＝観測（sample/snapshot）は完全に従来
+    どおり継続する方式にした（計測材料を欠損させないため）。(c) 顔ベースラインは高スコア
+    フレームも中央値窓へ入れる（10秒窓では短い笑顔は少数派で中央値をほぼ動かさず、逆に長く
+    笑い続けると中央値が上がって自然に再発火しにくくなる＝過検出抑制になるため）。
+  - **未実施（明記）**: **SWA・コンテナへのデプロイは今回未実施**（本作業はローカルビルド検証
+    まで。机上検証レポート提示後に別途実施する指示のため）。backend/worker は無変更。
+
 ## 現在の状態（2026-07-10）
+
+- **Entra ID サインイン先（authority）の環境変数切替対応（2026-07-10・frontend のみ）**:
+  `frontend/src/lib/auth.ts` の `AUTHORITY` をハードコード（`.../common` 固定）から
+  `NEXT_PUBLIC_ENTRA_AUTHORITY || ".../common"` へ変更し、環境変数でサインイン先テナントを
+  切替可能にした。背景: Entra クライアントID **`9a6338d6-b944-45bd-a603-1f0cf7ebae38`**（公開値）
+  発行済み・アプリ登録は検証期間中は `admintech0` テナント（テナントID
+  `55f735cd-b170-4cfe-91ee-0b08d30d87e8`）にシングルテナント登録済みのため、`.env.production` に
+  `NEXT_PUBLIC_ENTRA_CLIENT_ID` と `NEXT_PUBLIC_ENTRA_AUTHORITY`（テナント固定URL）を設定して
+  再ビルド・デプロイし、API コンテナに `ENTRA_CLIENT_ID` を設定すれば有効化できる（手順は
+  `docs/dev-setup.md` §13-8(B) を更新済み）。マルチテナント移行時は authority を空へ戻し
+  （既定 common）、あわせてアプリ登録の対象アカウント種別を変更する必要がある（同 §13-8(B) 末尾に
+  注記）。検証: vitest 108件全パス（既存回帰・auth.ts に単体テストなし）／tsc 0エラー／
+  `next build` 成功。**`.env.production`／`.env.local` への値設定は本作業環境のツール権限
+  （該当ファイルへの Read/Write/Bash アクセスがいずれも拒否される設定）により実施できず、
+  ユーザー側での設定が必要**（`frontend/.env.example` への追記可否は別途確認）。
 
 - **ノイズゲート（固定 -50dB）＋声トリガーの両側化（family lane）実装完了
   （2026-07-10・frontend＋worker軽微／SWA 再デプロイ済み）**:

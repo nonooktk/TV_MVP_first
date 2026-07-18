@@ -42,6 +42,12 @@ export interface MeasurementSample {
   centroid_baseline_hz: number | null;
   /** この1秒間の基準比（centroid）最大値。 */
   centroid_ratio_peak: number | null;
+  /**
+   * この1秒間の基準比（centroid）の**中央値**（平滑値）。2026-07-18 追加。
+   * ピーク（centroid_ratio_peak）と併記し、Phase B で「平滑重心なら通常発話と識別できるか」を
+   * 検証するための材料（重心トリガーは既定停止したが計測は継続する）。窓が空なら null。
+   */
+  centroid_ratio_median: number | null;
   /** 自ゲイン現在値（dB）。取得できる場合のみ。 */
   auto_gain_db: number | null;
   /**
@@ -63,9 +69,14 @@ export interface MeasurementSample {
   /**
    * 家族側の表情スコア（face_score）のこの1秒間の最大値。ピークホールド。
    * 顔検知の家族側化・顔トリガー（Phase 2）。顔検知なし（familyVideoTrack 未指定）の
-   * 通話では常に null。sustain 300ms の顔トリガーを1Hzサンプリングで取りこぼさないため。
+   * 通話では常に null。sustain 500ms の顔トリガーを1Hzサンプリングで取りこぼさないため。
    */
   face_score_peak: number | null;
+  /**
+   * 顔トリガーの本人ベースライン（直近10秒ローリング中央値・その1秒毎の現在値）。
+   * 2026-07-18 追加（顔トリガーの「変化」化）。顔検知なしの通話では常に null。
+   */
+  face_baseline: number | null;
 }
 
 /** 発火イベント（発火瞬間の全スナップショット＋完了時の情報）。 */
@@ -92,6 +103,37 @@ export interface MeasurementTriggerEvent {
   source: "elder" | "family";
 }
 
+/**
+ * スパイク棄却イベント（発火確認窓で破棄・2026-07-18 追加）。
+ * rmsTrigger の確認窓中に非発話へ落ちて発火を破棄したときに記録する
+ * （咳・くしゃみ等の破裂音対策＝C1台本の効果測定用）。
+ */
+export interface MeasurementSpikeRejectedEvent {
+  /** 通話開始からの秒。 */
+  t: number;
+  type: "spike_rejected";
+  /** 破棄が起きたレーン（"elder"／"family"）。 */
+  source: "elder" | "family";
+}
+
+/**
+ * シナリオマーカー（Round 2 の集計自動化・2026-07-18 追加）。
+ * 計測UIの「打刻」ボタンで、その瞬間に実施中のシナリオ（A1〜C3・自由入力）を記録する。
+ */
+export interface MeasurementMarkerEvent {
+  /** 通話開始からの秒。 */
+  t: number;
+  type: "marker";
+  /** シナリオラベル（例 "A1"・"C2"・自由入力文字列）。 */
+  label: string;
+}
+
+/** 計測ログに記録される全イベント（発火・スパイク棄却・マーカーの直和）。 */
+export type MeasurementEvent =
+  | MeasurementTriggerEvent
+  | MeasurementSpikeRejectedEvent
+  | MeasurementMarkerEvent;
+
 /** エクスポート JSON のトップレベル形式。 */
 export interface MeasurementLogExport {
   version: 1;
@@ -102,7 +144,7 @@ export interface MeasurementLogExport {
     centroid: CentroidTriggerParams;
   };
   samples: MeasurementSample[];
-  events: MeasurementTriggerEvent[];
+  events: MeasurementEvent[];
 }
 
 /** サンプルのリング上限（1Hz × 3600秒 = 60分相当）。 */
@@ -116,6 +158,8 @@ export const SAMPLE_INTERVAL_MS = 1000;
 interface Accumulator {
   risePeakDb: number | null;
   centroidRatioPeak: number | null;
+  /** この1秒間の重心基準比サンプル（中央値 centroid_ratio_median 算出用・2026-07-18 追加）。 */
+  centroidRatios: number[];
   speechFrames: number;
   totalFrames: number;
   /** ノイズゲート（固定 -50dB）未満だったフレーム数（2026-07-10 追加）。 */
@@ -132,6 +176,7 @@ function freshAccumulator(): Accumulator {
   return {
     risePeakDb: null,
     centroidRatioPeak: null,
+    centroidRatios: [],
     speechFrames: 0,
     totalFrames: 0,
     gatedFrames: 0,
@@ -139,6 +184,16 @@ function freshAccumulator(): Accumulator {
     familyCentroidRatioPeak: null,
     faceScorePeak: null,
   };
+}
+
+/** 数値配列の中央値（空なら null）。centroid_ratio_median 用の内部ヘルパ。 */
+function medianOf(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1
+    ? sorted[mid]
+    : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
 /**
@@ -163,7 +218,7 @@ export class MeasurementLog {
   private readonly centroidParams: CentroidTriggerParams;
 
   private samples: MeasurementSample[] = [];
-  private events: MeasurementTriggerEvent[] = [];
+  private events: MeasurementEvent[] = [];
   private acc: Accumulator = freshAccumulator();
   private lastTickMs: number | null = null;
   // 直近の未完了イベント（recordTriggerComplete で埋める）。
@@ -215,6 +270,8 @@ export class MeasurementLog {
         this.acc.centroidRatioPeak === null
           ? frame.centroidRatio
           : Math.max(this.acc.centroidRatioPeak, frame.centroidRatio);
+      // 中央値（平滑値）算出用に、この1秒間の基準比を貯める（2026-07-18 追加）。
+      this.acc.centroidRatios.push(frame.centroidRatio);
     }
   }
 
@@ -267,6 +324,11 @@ export class MeasurementLog {
       centroid: CentroidTriggerState;
       noiseFloorDb: number | null;
       autoGainDb: number | null;
+      /**
+       * 顔トリガーの本人ベースライン（直近10秒中央値・face_baseline 用・2026-07-18 追加）。
+       * 顔検知なしの通話・既存呼び出しでは省略（null 扱い）。
+       */
+      faceBaseline?: number | null;
     },
     nowMs: number
   ): void {
@@ -295,11 +357,13 @@ export class MeasurementLog {
       centroid_hz: snapshot.centroid.lastCentroidHz,
       centroid_baseline_hz: snapshot.centroid.baselineHz,
       centroid_ratio_peak: this.acc.centroidRatioPeak,
+      centroid_ratio_median: medianOf(this.acc.centroidRatios),
       auto_gain_db: snapshot.autoGainDb,
       gate_ratio: gateRatio,
       family_rise_peak_db: this.acc.familyRisePeakDb,
       family_centroid_ratio_peak: this.acc.familyCentroidRatioPeak,
       face_score_peak: this.acc.faceScorePeak,
+      face_baseline: snapshot.faceBaseline ?? null,
     };
 
     this.samples.push(sample);
@@ -353,6 +417,38 @@ export class MeasurementLog {
     this.pendingEvent.photo_count = photoCount;
     this.pendingEvent.partial_save = partialSave;
     this.pendingEvent = null;
+  }
+
+  /**
+   * スパイク棄却（発火確認窓で破棄・2026-07-18 追加）を記録する。
+   * rmsTrigger の確認窓中に非発話へ落ちて発火を破棄したときに index.ts から呼ぶ。
+   */
+  recordSpikeRejected(nowMs: number, source: "elder" | "family" = "elder"): void {
+    const ev: MeasurementSpikeRejectedEvent = {
+      t: this.elapsedSec(nowMs),
+      type: "spike_rejected",
+      source,
+    };
+    this.events.push(ev);
+    if (this.events.length > MAX_EVENTS) {
+      this.events.shift();
+    }
+  }
+
+  /**
+   * シナリオマーカー（Round 2 の集計自動化・2026-07-18 追加）を記録する。
+   * 計測UIの「打刻」ボタンから呼ぶ。label は A1〜C3 または自由入力文字列。
+   */
+  recordMarker(label: string, nowMs: number): void {
+    const ev: MeasurementMarkerEvent = {
+      t: this.elapsedSec(nowMs),
+      type: "marker",
+      label,
+    };
+    this.events.push(ev);
+    if (this.events.length > MAX_EVENTS) {
+      this.events.shift();
+    }
   }
 
   /** 現在の記録件数（デバッグパネル表示用）。 */

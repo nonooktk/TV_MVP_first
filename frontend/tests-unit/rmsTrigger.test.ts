@@ -503,18 +503,19 @@ describe("RmsTrigger", () => {
 
   // --- rise 閾値のモード依存化（2026-07-07）-----------------------------------
 
-  it("モード別閾値: provisional モードでは +24dB 未満は発火せず、+24dB 以上で発火する", () => {
+  it("モード別閾値: provisional モードでは +26dB 未満は発火せず、+26dB 以上で発火する", () => {
     // 発話累計で speech モードへ切り替わらないよう speechAccumMs=∞ で provisional に固定する。
+    // 2026-07-18（Round 1 実測）: provisional 閾値を +24→+26dB に引き上げ。
     const trig = new RmsTrigger({ speechAccumMs: Number.POSITIVE_INFINITY });
     let t = 0;
     feed(trig, -40, 120, 0); // baseline≈-40 を確立（provisional のまま）
     t = 120 * DT;
     expect(trig.snapshot(t).mode).toBe("provisional");
-    expect(trig.snapshot(t).riseThresholdDb).toBe(24);
+    expect(trig.snapshot(t).riseThresholdDb).toBe(26);
 
     // +20dB（provisional 閾値未満）では発火しない。
     let firedUnder = 0;
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < 10; i++) {
       const ev = trig.push(-20, t);
       if (ev) firedUnder += 1;
       t += DT;
@@ -527,10 +528,10 @@ describe("RmsTrigger", () => {
       t += DT;
     }
 
-    // +24dB を明確に超える（-10dB）なら発火する
-    //（直前の -20dB 投入で baseline がわずかに上昇EMA分動くため、余裕を持たせた値を使う）。
+    // +26dB を明確に超える（-10dB）なら発火する。
+    // sustain(150ms) 成立後に確認窓(150ms) を挟むため、余裕を持って 10 サンプル流す。
     let firedOver = 0;
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < 10; i++) {
       const ev = trig.push(-10, t);
       if (ev) firedOver += 1;
       t += DT;
@@ -538,8 +539,9 @@ describe("RmsTrigger", () => {
     expect(firedOver).toBe(1);
   });
 
-  it("モード別閾値: speech モードでは +12dB で発火する（provisional なら発火しない上昇幅）", () => {
+  it("モード別閾値: speech モードでは +20dB で発火する（provisional なら発火しない上昇幅）", () => {
     // speech モードへ即切替（speechAccumMs=0）。ノイズフロア設定で発話ゲートを有効化。
+    // 2026-07-18（Round 1 実測）: speech 閾値を +12→+20dB に引き上げ。
     const trig = new RmsTrigger({ speechAccumMs: 0 });
     trig.setNoiseFloorDb(-60); // 発話ゲート -52dB
     let t = 0;
@@ -550,13 +552,13 @@ describe("RmsTrigger", () => {
     }
     const snap = trig.snapshot(t);
     expect(snap.mode).toBe("speech");
-    expect(snap.riseThresholdDb).toBe(12);
+    expect(snap.riseThresholdDb).toBe(20);
 
-    // +15dB（-20dB）は speech 閾値(+12dB)を超えるが provisional 閾値(+24dB)には満たない。
-    // speech モードなら発火する。
+    // +23dB（-12dB）は speech 閾値(+20dB)を超えるが provisional 閾値(+26dB)には満たない。
+    // speech モードなら発火する（sustain150ms＋確認窓150ms のため余裕を持って 8 サンプル）。
     let fired = 0;
     for (let i = 0; i < 8; i++) {
-      const ev = trig.push(-20, t);
+      const ev = trig.push(-12, t);
       if (ev) fired += 1;
       t += DT;
     }
@@ -571,9 +573,9 @@ describe("RmsTrigger", () => {
     feed(trig, -40, 120, 0); // baseline≈-40（provisional・閾値+24dB）
     t = 120 * DT;
 
-    // 1回目発火（-10dB＝rise+30dB）。
+    // 1回目発火（-10dB＝rise+30dB）。sustain150ms＋確認窓150ms のため 8 サンプル流す。
     let fired1 = 0;
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 8; i++) {
       const ev = trig.push(-10, t);
       if (ev) fired1 += 1;
       t += DT;
@@ -601,7 +603,7 @@ describe("RmsTrigger", () => {
 
     // 再度上げると発火する（クールダウンも明けている）。
     let fired2 = 0;
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 8; i++) {
       const ev = trig.push(-10, t);
       if (ev) fired2 += 1;
       t += DT;
@@ -680,6 +682,108 @@ describe("RmsTrigger", () => {
       expect(trig.sample().gated).toBe(false);
       trig.push(-55, 50);
       expect(trig.sample().gated).toBe(true);
+    });
+  });
+
+  // --- スパイク棄却＝発火確認窓（confirmWindowMs=150ms・2026-07-18）-------------
+
+  describe("スパイク棄却（発火確認窓）", () => {
+    it("confirmWindowMs（150）が支給初期値", () => {
+      expect(DEFAULT_RMS_PARAMS.confirmWindowMs).toBe(150);
+    });
+
+    it("確認窓の間ずっと発話が続けば、sustain＋確認窓ぶん遅れて発火する", () => {
+      const trig = new RmsTrigger();
+      let t = 0;
+      feed(trig, -40, 120, 0); // baseline≈-40（provisional・閾値+26dB）
+      t = 120 * DT;
+
+      // -10dB（rise+30）。sustain(150ms=3)＋確認窓(150ms=3)=6サンプル目で発火する。
+      let fired = 0;
+      let firedAt = -1;
+      for (let i = 0; i < 10; i++) {
+        const ev = trig.push(-10, t);
+        if (ev) {
+          fired += 1;
+          if (firedAt < 0) firedAt = i;
+        }
+        t += DT;
+      }
+      expect(fired).toBe(1);
+      // 確認窓ぶん（3サンプル）遅れて 6 サンプル目（index 5）で発火する。
+      expect(firedAt).toBe(5);
+      // 破棄は起きていない。
+      expect(trig.snapshot(t).spikeRejectedCount).toBe(0);
+    });
+
+    it("確認窓の途中で非発話（ノイズゲート割れ）へ落ちると発火が破棄される（スパイク棄却）", () => {
+      const trig = new RmsTrigger();
+      let t = 0;
+      feed(trig, -40, 120, 0);
+      t = 120 * DT;
+
+      // sustain 成立まで -10dB を3サンプル → 確認窓に入る（pendingConfirm）。
+      for (let i = 0; i < 3; i++) {
+        trig.push(-10, t);
+        t += DT;
+      }
+      expect(trig.snapshot(t).pendingConfirm).toBe(true);
+
+      // 確認窓の途中で非発話（-70dB＝ノイズゲート/VAD床割れ）へ落ちる → 破棄。
+      const ev = trig.push(-70, t);
+      t += DT;
+      expect(ev).toBeNull();
+      expect(trig.snapshot(t).pendingConfirm).toBe(false);
+      expect(trig.snapshot(t).spikeRejectedCount).toBe(1);
+      // index.ts が計測ログへ記録するためのフラグ（consume すると false へ）。
+      expect(trig.consumeSpikeRejected()).toBe(true);
+      expect(trig.consumeSpikeRejected()).toBe(false);
+      expect(trig.snapshot(t).triggerCount).toBe(0); // 発火はしていない
+    });
+
+    it("咳・くしゃみ様の破裂音（短い大音圧→無音）は棄却され、写真は撮られない", () => {
+      const trig = new RmsTrigger();
+      let t = 0;
+      feed(trig, -40, 120, 0);
+      t = 120 * DT;
+
+      let fired = 0;
+      // 「大音圧3サンプル（sustain成立）→ すぐ無音」を繰り返す（破裂音を模す）。
+      for (let cycle = 0; cycle < 5; cycle++) {
+        for (let i = 0; i < 3; i++) {
+          const ev = trig.push(-8, t);
+          if (ev) fired += 1;
+          t += DT;
+        }
+        // 直後に無音（確認窓の途中で非発話へ）。
+        for (let i = 0; i < 5; i++) {
+          trig.push(-70, t);
+          t += DT;
+        }
+      }
+      expect(fired).toBe(0); // 一度も発火しない（すべて棄却）
+      expect(trig.snapshot(t).spikeRejectedCount).toBe(5); // 5回とも破棄された
+    });
+
+    it("confirmWindowMs=0 なら従来どおり sustain 成立で即発火する（後方互換）", () => {
+      const trig = new RmsTrigger({ confirmWindowMs: 0 });
+      let t = 0;
+      feed(trig, -40, 120, 0);
+      t = 120 * DT;
+
+      // -10dB を4サンプル。確認窓なしなので sustain(150ms=3) 成立の3サンプル目で即発火する。
+      let fired = 0;
+      let firedAt = -1;
+      for (let i = 0; i < 4; i++) {
+        const ev = trig.push(-10, t);
+        if (ev) {
+          fired += 1;
+          if (firedAt < 0) firedAt = i;
+        }
+        t += DT;
+      }
+      expect(fired).toBe(1);
+      expect(firedAt).toBe(2); // 確認窓なし＝3サンプル目（index 2）で即発火
     });
   });
 });

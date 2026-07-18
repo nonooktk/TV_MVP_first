@@ -53,6 +53,8 @@ function makeExport(
           mode: "provisional",
           speechAccumMs: 0,
           speechMedianDb: null,
+          pendingConfirm: false,
+          spikeRejectedCount: 0,
         },
         centroid: {
           lastCentroidHz: 1200,
@@ -88,6 +90,8 @@ function makeExport(
         mode: "provisional",
         speechAccumMs: 0,
         speechMedianDb: null,
+        pendingConfirm: false,
+        spikeRejectedCount: 0,
       },
       {
         lastCentroidHz: 1200,

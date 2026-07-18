@@ -5,7 +5,8 @@
 
 | パラメータ | 初期値 |
 | --- | --- |
-| **RMS発火しきい値（baseline比上昇・モード依存化）** | **仮基準（provisional）= +24dB（riseThresholdProvisionalDb）／発話基準（speech）= +12dB（riseThresholdSpeechDb）。2026-07-07 実測フィードバックにより一律 +6dB から分割・引き上げ。凍結判定・持続カウント・発火判定はすべて現行モードの閾値を参照する** |
+| **RMS発火しきい値（baseline比上昇・モード依存化）** | **仮基準（provisional）= +26dB（riseThresholdProvisionalDb）／発話基準（speech）= +20dB（riseThresholdSpeechDb）。2026-07-07 に一律 +6dB から +24／+12 へ分割、2026-07-18（Round 1 実測）に通常発話での過検出を抑えるため +26／+20 へ引き上げ。凍結判定・持続カウント・発火判定はすべて現行モードの閾値を参照する** |
+| **発火確認窓＝スパイク棄却（confirmWindowMs・2026-07-18 追加）** | **150ms。sustain 成立後、即発火せず 150ms の「確認窓」を張り、その間に非発話（ノイズゲート割れ or VAD床割れ）へ一度でも落ちたら咳・くしゃみ等の破裂音とみなして発火を破棄する（確認窓の間ずっと発話が続けば満了時に発火）。発火は最大150ms遅れるが、写真連写は look-back リングで過去に遡って撮るため取りこぼしはない。破棄回数は snapshot().spikeRejectedCount／計測ログの `spike_rejected` イベントで観測。confirmWindowMs<=0 で従来どおり即発火（後方互換）。実装: `rmsTrigger.ts`（elder／family 両レーン）** |
 | baseline 仮初期値（provisionalBaselineDb） | **-32dB**（自動ゲイン目標 -30dBFS と整合。初回有声サンプルで baseline = min(サンプル値, -32)） |
 | **基準の2段階化（改良1・発話基準）** | **Phase 1（発話累計 <5秒）= 仮基準・静音区間ベースの非対称 EMA（下記）。Phase 2（発話累計 ≥5秒で切替）= 発話フレーム音圧の中央値（直近20秒ローリング窓）を基準にする。以後も窓は更新し続ける** |
 | 発話ゲート（speechGateDb） | **ノイズフロア +8dB 以上のフレームを「発話」とみなす（SPEECH_GATE_DB=8）。発話累計・中央値窓の対象判定に使う。rise ≥ 現行モードの閾値の盛り上がりフレームは中央値窓に入れない** |
@@ -18,14 +19,14 @@
 | **リアーム条件（2026-07-07 追加）** | **発火後は「rise が現行閾値未満に一度戻る」まで再発火しない（armed フラグ・クールダウンと AND）。無音（VADゲート未満）は「声が収まった」とみなしリアームする。重心トリガーにも同様のリアームを適用（基準比が閾値未満に戻るまで再発火しない）** |
 | VADゲート（vadFloorDb） | -55dB（初期値）**／家族側は自動化: ノイズフロア推定 → 床=ノイズ+8dB・[-50,-45] クランプを1秒ごとに反映（`audioPipeline`→`rmsTrigger.setVadFloorDb`。2026-07-10: ノイズゲート追加に伴いクランプ下限を -70→-50 に変更）** |
 | **ノイズゲート（noiseGateDb・2026-07-10 追加）** | **固定 -50dB。vadFloorDb（動的）の値に関わらず、これ未満は常に「完全な無音」として扱う（トリガー評価・baseline学習・発話判定のいずれも行わない）。「-50dB未満には絶対反応しない」ことの固定の安全網。実装: `rmsTrigger.ts` の `DEFAULT_RMS_PARAMS.noiseGateDb`。snapshot に `noiseGateDb`／`gated`（現在フレームがゲート未満か）を追加しデバッグパネルに表示。送信音声そのものには一切手を加えない（聞こえ方は不変）** |
-| **スペクトル重心トリガー（改良2・2026-07-07 厳密化）** | **AnalyserNode 周波数データから重心(Hz)を50ms間隔で算出（毎フレーム push・発話ゲート成立可否を同時に渡す）。基準=発話重心の中央値（20秒窓・改良1と同じ仕組み。非発話フレームは基準を更新しない）。重心が基準比 +30%（CENTROID_RISE_RATIO=1.3。2026-07-07 実測フィードバックにより +20%→+30%）を 200ms（CENTROID_SUSTAIN_MS=200）持続**かつ発話ゲート成立（現在フレームがノイズフロア+8dB以上）を同時必須**で `trigger_reason="centroid"` を発火（共有クールダウン8秒）。持続カウントは発話フレームのみで積算し、非発話フレームでリセットする（無言時の発火排除）。リアーム: 基準比が閾値未満に戻るまで再発火しない。声色（笑い声・高い声）を音圧と独立の軸で捉える。実装: `centroidTrigger.ts`** |
+| **スペクトル重心トリガー（改良2・2026-07-18 既定停止）** | **【2026-07-18 Round 1 実測により発火経路を既定停止（enabled=false）】重心は通常発話の 92% の時間で基準比 1.3 を超え、誤発火の 78% を占めた＝音圧と独立の特徴量として現状は成立していないため、発火だけを止める（Phase B で再設計するまで停止）。**計測（sample()/snapshot()・計測ログの重心値）は継続する**（停止＝発火しないだけ）。パラメータ `enabled:true` で再有効化可能。以下は enabled=true 時の挙動: AnalyserNode 周波数データから重心(Hz)を50ms間隔で算出。基準=発話重心の中央値（20秒窓）。基準比 +30%（CENTROID_RISE_RATIO=1.3）を 200ms（CENTROID_SUSTAIN_MS=200）持続かつ発話ゲート成立で `trigger_reason="centroid"` 発火（共有クールダウン8秒）。実装: `centroidTrigger.ts`** |
 | 連写枚数・間隔 | 10枚・約2秒間・200ms間隔 |
 | スニペット範囲 | 検知前2秒＋検知後3秒 |
 | AGC（自動ゲイン制御） | オフ（送信側で設定）**／実装済み（`agoraCall.ts`：高齢者側 join=uid=2 で `AGC:false`。AEC=維持・ANS=既定）** |
 | 自動ゲイン（送信側の発話レベル正規化） | **有効化（`autoGain.ts`：高齢者側 uid=2 のみ）。目標 -30dBFS・有声RMS EMA τ≈3s・更新2秒ごと・スルーレート±2dB/更新・クランプ 0〜+18dB。AGC の代替ではなく“ゆっくり正規化”（相対上昇検知を壊さない）** |
 | **声トリガーの両側化（family lane・2026-07-10 追加）** | **家族側ローカルマイク音声に第2の検知系統（family lane）を追加。rmsTrigger／centroidTrigger／audioPipeline を高齢者側（elder レーン）とは別インスタンスで持ち、baseline・発話累計・ノイズフロア推定・ノイズゲート・リアームのすべてを独立に学習する。初期値は elder レーンと同一（noiseGate 含む）。STT は elder のみ（family lane には付けない）。クールダウンは elder/family 全系統で共有（8秒）。発火時の写真連写は現状どおり高齢者側 video リングから（両側連写は次フェーズ）。発火イベント・写真 metadata に `trigger_source`（"elder"／"family"）を追加（既存データは elder 扱いのデフォルト）。実装: `frontend/src/modules/detection/index.ts`（family lane 配線）・`frontend/src/modules/call/agoraCall.ts`（`onLocalAudioTrack` で家族側ローカルマイクの生トラックを渡す）** |
 | **顔検知の家族側化（Phase 2・2026-07-10 追加）** | **MediaPipe 表情検知（facePipeline）の入力を、高齢者側リモート映像 → **家族側ローカルカメラ**（孫が映る側）に切り替える。MediaPipe インスタンスは従来どおり1つだけ（高齢者側の顔検知はしない＝負荷対策）。face_score 算出ロジック（mouthSmile 系 blendshape 平均）は不変。実装: `frontend/src/modules/detection/index.ts`（facePipeline を family 映像に接続）・`frontend/src/modules/call/agoraCall.ts`（`onLocalVideoTrack` で家族側ローカルカメラの生トラックを渡す）** |
-| **顔トリガー（faceTrigger・Phase 2・2026-07-10 追加）** | **家族側の表情スコア（face_score）が**絶対閾値 `faceTriggerScore=0.7` を `faceSustainMs=300ms` 持続**で発火する（reason="face"・trigger_source="family"）。RMS/重心の「baseline 比」とは異なり**絶対値**で判定する（笑顔の強さそのもの）。**全系統共有クールダウン（8秒・全系統横断）に参加**。リアーム: スコアが閾値未満に一度戻るまで再発火しない。約100ms間隔で facePipeline.score() を読み取り faceTrigger へ投入する。実装: `frontend/src/modules/detection/faceTrigger.ts` の `DEFAULT_FACE_TRIGGER_PARAMS`（`scoreThreshold=0.7`／`sustainMs=300`／`sampleIntervalMs=100`）** |
+| **顔トリガー（faceTrigger・2026-07-18「変化」化）** | **【2026-07-18 Round 1 実測により絶対値のみ→「変化」化】普通の笑顔でも 0.7 を超えて過検出したため、**本人ベースライン比の上昇**を AND 条件に追加した。発火条件: `score >= 0.85`（絶対 `faceTriggerScore`）**かつ** `score - baseline >= 0.4`（上昇 `faceRiseDelta`）を **500ms 持続**（`faceSustainMs`。300→500）。ベースライン = 顔スコアの直近10秒ローリング中央値（`faceBaselineWindowMs=10000`。RollingMedian 流用）。無表情→笑顔の“変化”で発火し、ずっと笑顔（変化なし）では発火しない。reason="face"・trigger_source="family"。全系統共有クールダウン（8秒）に参加。リアーム: スコアが 0.85 未満に戻るまで再発火しない。計測ログに `face_baseline`（本人ベースラインの1秒毎の現在値）を記録。実装: `frontend/src/modules/detection/faceTrigger.ts` の `DEFAULT_FACE_TRIGGER_PARAMS`（`scoreThreshold=0.85`／`riseDelta=0.4`／`baselineWindowMs=10000`／`sustainMs=500`／`sampleIntervalMs=100`）** |
 | **両側連写（Phase 2・2026-07-10 追加）** | **どのトリガー（rms/stt/centroid/face・elder/family いずれ）でも、発火時に**高齢者側リング＋家族側リングの両方から10枚ずつ（計20枚）連写**する（look-back 込み・2バーストは並列実行）。写真 metadata に `stream`（"elder"／"family"）を付与。家族側の写真には家族側 facePipeline のコマ別 face_score を付与、**高齢者側の写真は face_score=0**（音圧採点＋既存の救済フォールバックで選別）。通知「記録しました（N）」の N は両側合計。8秒全体タイムアウト・部分保存の既存機構は両側分に対して機能する。音声スニペットは従来どおり高齢者側のみ（変更しない）。実装: `index.ts`（family videoRing＋両側 captureBurst＋`toPhotoRecords`）** |
 
 > 実測で調整。チューニングは検収対象外。
@@ -35,6 +36,29 @@
 ## 初期値の変更履歴
 
 初期値の更新は「支給初期値の改訂」であり、検収条件（機能）は不変。
+
+- **2026-07-18（Round 1 実測に基づく検知トリガーの再構成）**: 実地テスト Round 1
+  （3セッション・231発火）の分析結果に基づき、トリガー構成を見直した。根拠数字と変更点:
+  - **重心トリガーの停止（既定 enabled=false・計測は継続）**: 重心は**誤発火の78%**を占め、
+    **通常発話の92%の時間で閾値1.3を超過**（＝音圧と独立の特徴量として不成立）だったため、
+    発火経路を既定停止した。計測ログへの重心値の記録は継続し、`centroid_ratio_median`
+    （その1秒の基準比の中央値＝平滑値）を追加して Phase B で「平滑重心なら識別できるか」を
+    検証する材料にする。実装: `centroidTrigger.ts` の `DEFAULT_CENTROID_PARAMS.enabled`。
+  - **RMS 閾値の引き上げ**: 通常発話での過検出を抑えるため、`riseThresholdSpeechDb` 12→**20**、
+    `riseThresholdProvisionalDb` 24→**26**（elder・family 両系統。DEFAULT_RMS_PARAMS）。
+  - **スパイク棄却（発火確認窓 confirmWindowMs=150ms）**: 咳・くしゃみ・生活音の破裂音対策。
+    sustain 成立後に即発火せず150msの確認窓を張り、その間に非発話へ落ちたら発火を破棄する。
+    発火は最大150ms遅れるが look-back リングで写真は取りこぼさない。破棄は snapshot の
+    `spikeRejectedCount`・計測ログの `spike_rejected` イベントに記録。実装: `rmsTrigger.ts`。
+  - **顔トリガーの「変化」化**: 絶対値0.7は普通の笑顔で超えるため、`score>=0.85` **かつ**
+    `score-baseline>=0.4`（本人の直近10秒中央値からの上昇）を **500ms 持続**へ変更
+    （`faceTriggerScore=0.85`／`faceRiseDelta=0.4`／`faceSustainMs=500`／
+    `faceBaselineWindowMs=10000`）。計測ログに `face_baseline` を追加。実装: `faceTrigger.ts`。
+  - **シナリオマーカー**: 計測UI（`NEXT_PUBLIC_MEASUREMENT_UI=1`）に打刻UI（A1〜C3・自由入力＋
+    「打刻」ボタン）を追加し、計測ログの events に `marker` を記録する（Round 2 の集計自動化）。
+    実装: `app/call/page.tsx`・`index.ts`（`recordMarker`）・`measurementLog.ts`。
+  - 検収条件（機能）は不変。連写10枚・スニペット範囲（前2秒〜後3秒）・共有クールダウン（8秒）・
+    重心の判定式（enabled=true 時は +30%/200ms 据え置き）は変えていない。
 
 - **2026-07-10（Phase 2: 顔検知の家族側化・顔トリガー新設・両側連写）**: 実装の正は
   `faceTrigger.ts`（新規）・`index.ts`・`app/call/agoraCall.ts`・`app/call/page.tsx`・
@@ -224,17 +248,27 @@
   `baseline_db`／`mode`／`speech_accum_ms`／`speech_median_db`（現在値）・`armed`・
   `vad_floor_db`・`noise_floor_db`・`speech_ratio`（この1秒間の発話フレーム率 0〜1）・
   `centroid_hz`／`centroid_baseline_hz`（現在値）・`centroid_ratio_peak`（この1秒間の基準比
-  最大値）・`auto_gain_db`（自ゲイン現在値。取得できる場合のみ）・`gate_ratio`（この1秒間で
+  最大値）・`centroid_ratio_median`（この1秒間の基準比の中央値＝平滑値。2026-07-18 追加。ピークと
+  併記し、Phase B で「平滑重心なら通常発話と識別できるか」を検証する材料）・`auto_gain_db`
+  （自ゲイン現在値。取得できる場合のみ）・`gate_ratio`（この1秒間で
   ノイズゲート未満だったフレーム率 0〜1。2026-07-10 追加・elder レーンの観測）・
   `family_rise_peak_db`／`family_centroid_ratio_peak`（family lane のこの1秒間のピーク値。
   2026-07-10 追加。family lane 未接続の通話では常に null）・`face_score_peak`（家族側の
   face_score のこの1秒間のピーク。顔トリガー・Phase 2・2026-07-10 追加。顔検知なしの通話では
-  常に null）。
-- **発火イベント**: `t`・`type:"trigger"`・`reason`（rms/centroid/stt/force）・
+  常に null）・`face_baseline`（顔トリガーの本人ベースライン＝直近10秒中央値の1秒毎の現在値。
+  2026-07-18 追加。顔検知なしの通話では常に null）。
+- **発火イベント**: `t`・`type:"trigger"`・`reason`（rms/centroid/stt/face/force）・
   `source`（`"elder"`／`"family"`。声トリガーの両側化・2026-07-10 追加。省略呼び出しは
   `"elder"` 既定）・発火瞬間の全スナップショット（rise・mode・centroid比・armed 等を含む
   発火元レーンの rmsTrigger/centroidTrigger の `snapshot()` そのもの）・完了時に確定する
   `photo_count`・部分保存（タイムアウト救済）フラグ `partial_save`。
+- **スパイク棄却イベント（2026-07-18 追加）**: `t`・`type:"spike_rejected"`・`source`
+  （`"elder"`／`"family"`）。rmsTrigger の発火確認窓の途中で非発話へ落ちて発火を破棄した
+  ときに記録する（咳・くしゃみ等の破裂音対策の効果測定＝C1台本用）。
+- **シナリオマーカーイベント（2026-07-18 追加）**: `t`・`type:"marker"`・`label`（A1〜C3 または
+  自由入力）。計測UI（`NEXT_PUBLIC_MEASUREMENT_UI=1` 時）の「打刻」ボタンで記録する
+  （Round 2 の集計自動化用）。events はこれら3種（trigger／spike_rejected／marker）の直和で、
+  いずれも最大200件のリングに従う。
 - **メモリ上限**: サンプルは最大 3600 件（60分相当・1Hz）、イベントは最大 200 件のリング
   バッファ（古いものから溢れる）。
 - **エクスポート形式（JSON）**: `version`（1）・`call_id`・`exported_at`（ISO8601）・
@@ -244,6 +278,10 @@
   `measurement-log-<callId>-<t>.json` をダウンロード）・「ログクリア」ボタンと、現在の
   記録件数（samples/events）の小表示を追加。ボタン表示はデバッグパネル限定（記録自体は
   デバッグモードに関係なく常時行う）。
+- **シナリオ打刻UI（2026-07-18 追加）**: 計測UI（`NEXT_PUBLIC_MEASUREMENT_UI=1`）のとき、
+  画面左下（📊ログボタンの少し上）にセレクト（A1〜A7・B1〜B8・C1〜C3・自由入力）＋「打刻」
+  ボタンを表示する。押すと計測ログの events に `{type:"marker", label, t}` を記録する
+  （Round 2 の集計自動化）。通話画面の邪魔にならない小ささ。
 
 ### ワンタップDL導線・通話終了後の回収導線（2026-07-08 追加）
 
