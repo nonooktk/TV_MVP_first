@@ -26,7 +26,7 @@ const DT = DEFAULT_CENTROID_PARAMS.sampleIntervalMs; // 50ms
 
 describe("CentroidTrigger", () => {
   it("基準確立後、基準比 +30% を 200ms 持続（発話ゲート成立）すると発火する", () => {
-    const trig = new CentroidTrigger();
+    const trig = new CentroidTrigger({ enabled: true });
     let t = 0;
 
     // 平常の重心 1000Hz を 2 秒（40サンプル）流して基準（中央値）を 1000 に確立（発話フレーム）。
@@ -55,7 +55,7 @@ describe("CentroidTrigger", () => {
   });
 
   it("持続不足（200ms 未満）では発火しない", () => {
-    const trig = new CentroidTrigger();
+    const trig = new CentroidTrigger({ enabled: true });
     let t = 0;
     for (let i = 0; i < 40; i++) {
       trig.push(1000, true, t);
@@ -77,7 +77,7 @@ describe("CentroidTrigger", () => {
   });
 
   it("盛り上がり（+30% 超）のフレームは中央値窓に入らず基準を吊り上げない", () => {
-    const trig = new CentroidTrigger();
+    const trig = new CentroidTrigger({ enabled: true });
     let t = 0;
     // 平常 1000Hz を 2 秒。基準 1000。
     for (let i = 0; i < 40; i++) {
@@ -95,7 +95,7 @@ describe("CentroidTrigger", () => {
   });
 
   it("sample() は直近の重心と基準比を返す（読み取り専用）", () => {
-    const trig = new CentroidTrigger();
+    const trig = new CentroidTrigger({ enabled: true });
     let t = 0;
     for (let i = 0; i < 40; i++) {
       trig.push(1000, true, t);
@@ -110,7 +110,7 @@ describe("CentroidTrigger", () => {
   // --- 発話ゲート必須化（2026-07-07）-------------------------------------------
 
   it("無言非発火: 発話ゲート不成立のフレームでは持続が積まれず発火しない", () => {
-    const trig = new CentroidTrigger();
+    const trig = new CentroidTrigger({ enabled: true });
     let t = 0;
     // 発話フレームで基準 1000Hz を確立。
     for (let i = 0; i < 40; i++) {
@@ -131,7 +131,7 @@ describe("CentroidTrigger", () => {
   });
 
   it("無言非発火: 発話↔非発話が交互だと持続がリセットされ続けて発火しない", () => {
-    const trig = new CentroidTrigger();
+    const trig = new CentroidTrigger({ enabled: true });
     let t = 0;
     for (let i = 0; i < 40; i++) {
       trig.push(1000, true, t);
@@ -155,7 +155,7 @@ describe("CentroidTrigger", () => {
   // --- リアーム条件（2026-07-07 追加）-----------------------------------------
 
   it("リアーム: 発火→高止まり中は再発火しない→比率が閾値未満に戻って再度上がると発火する", () => {
-    const trig = new CentroidTrigger();
+    const trig = new CentroidTrigger({ enabled: true });
     let t = 0;
     for (let i = 0; i < 40; i++) {
       trig.push(1000, true, t);
@@ -197,6 +197,49 @@ describe("CentroidTrigger", () => {
       t += DT;
     }
     expect(fired2).toBe(1);
+  });
+});
+
+// --- 発火経路の既定停止（2026-07-18 Round 1 実測）------------------------------
+// 重心トリガーは通常発話の 92% の時間で基準比 1.3 を超え、誤発火の 78% を占めたため、
+// 既定（enabled:false）では発火しない。ただし計測（sample()/snapshot()）は継続する。
+
+describe("CentroidTrigger: 発火経路の既定停止（enabled:false）", () => {
+  it("DEFAULT_CENTROID_PARAMS.enabled は false（既定停止）", () => {
+    expect(DEFAULT_CENTROID_PARAMS.enabled).toBe(false);
+  });
+
+  it("既定（enabled 未指定）では発火条件を満たしても一切発火しない", () => {
+    const trig = new CentroidTrigger(); // 既定＝停止中
+    let t = 0;
+    // 基準 1000Hz を確立。
+    for (let i = 0; i < 40; i++) {
+      trig.push(1000, true, t);
+      t += DT;
+    }
+    // +35%（1350Hz）を長く（発火条件を余裕で満たす長さ）投入しても発火しない。
+    let fired = 0;
+    for (let i = 0; i < 30; i++) {
+      const ev = trig.push(1350, true, t);
+      if (ev) fired += 1;
+      t += DT;
+    }
+    expect(fired).toBe(0);
+  });
+
+  it("停止中でも計測（sample()/snapshot()）は継続する（基準・基準比を観測できる）", () => {
+    const trig = new CentroidTrigger(); // 停止中
+    let t = 0;
+    for (let i = 0; i < 40; i++) {
+      trig.push(1000, true, t);
+      t += DT;
+    }
+    trig.push(1300, true, t);
+    // 発火はしないが、基準（≈1000）と基準比（≈1.3）は観測できる（Phase B 再設計の材料）。
+    const s = trig.sample();
+    expect(s.centroidHz).toBe(1300);
+    expect(s.riseRatio).toBeCloseTo(1.3, 1);
+    expect(trig.snapshot().baselineHz).toBeCloseTo(1000, 0);
   });
 });
 

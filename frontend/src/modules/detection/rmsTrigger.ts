@@ -38,6 +38,17 @@
 //   「-50dB 未満には絶対反応しない」ことを保証する目的（家族側のノイズフロア推定に依存しない
 //   固定の安全網）。現在フレームがゲート未満かは snapshot().gated で観測できる。
 //
+// 【スパイク棄却＝発火確認窓（confirmWindowMs=150ms・2026-07-18 Round 1 実測に基づく追加）】
+//   咳・くしゃみ・物音などの「破裂音」は、瞬間的に音圧が跳ね上がって sustain を満たすが、
+//   その直後に音が消える（非発話へ落ちる）。これを発話の盛り上がりと区別するため、
+//   sustain 成立後に **即発火せず confirmWindowMs（150ms）の確認窓** を張る。確認窓の間に
+//   非発話（ノイズゲート割れ or VAD床割れ）へ一度でも落ちたら「スパイク」とみなして発火を
+//   破棄する（破棄は snapshot().spikeRejectedCount と consumeSpikeRejected() で観測できる）。
+//   確認窓の間ずっと発話が続けば、確認窓の満了時に発火する。
+//   ※ 発火タイミングは最大 confirmWindowMs（150ms）遅れるが、写真連写には look-back リング
+//     （VideoRing）があるため、確認窓ぶん過去に遡って撮れる＝写真の取りこぼしは起きない。
+//   ※ confirmWindowMs<=0 のときは従来どおり sustain 成立で即発火する（後方互換）。
+//
 // このファイルは DOM / WebAudio に一切依存しない純粋ロジック（vitest で単体テストする）。
 // パラメータは 1 つの設定オブジェクトに集約する。
 //
@@ -135,6 +146,13 @@ export interface RmsTriggerParams {
   riseThresholdSpeechDb: number;
   /** 発火に必要な上昇の持続時間（ms）。150〜300ms（初期値150ms）。 */
   sustainMs: number;
+  /**
+   * 発火確認窓（ms・スパイク棄却・2026-07-18 追加）。
+   * sustain 成立後、即発火せずこの時間だけ「確認窓」を張り、その間に非発話（ノイズゲート
+   * 割れ or VAD床割れ）へ落ちなければ確認窓の満了時に発火する。落ちたらスパイクとして破棄。
+   * 0 以下なら即発火（後方互換）。支給初期値 150ms（look-back リングにより写真は取りこぼさない）。
+   */
+  confirmWindowMs: number;
   /** 発火後のクールダウン（ms）。2026-07-07 実測フィードバックにより 4s→8s。 */
   cooldownMs: number;
 
@@ -180,13 +198,18 @@ export const DEFAULT_RMS_PARAMS: RmsTriggerParams = {
   // これ未満は絶対に「無音」として扱う（固定の安全網）。
   noiseGateDb: -50,
   // rise 閾値のモード依存化（2026-07-07 実測フィードバック）。
-  // 仮基準（provisional）は baseline がまだ安定していないため高め（+24dB）、
-  // 発話基準（speech）は baseline が発話中央値に収束済みで信頼できるため低め（+12dB）。
-  riseThresholdProvisionalDb: 24,
-  riseThresholdSpeechDb: 12,
+  // 仮基準（provisional）は baseline がまだ安定していないため高め、発話基準（speech）は
+  // baseline が発話中央値に収束済みで信頼できるため低めにする。
+  // 2026-07-18（Round 1 実測）: 通常発話での過検出を抑えるため引き上げ
+  //   （provisional +24→+26／speech +12→+20dB）。
+  riseThresholdProvisionalDb: 26,
+  riseThresholdSpeechDb: 20,
   // 発火に必要な上昇の持続。150〜300ms の下限（発火を出やすくする）。
   // 2026-07-05 オーナー実測フィードバックにより 200ms → 150ms。
   sustainMs: 150,
+  // 発火確認窓（スパイク棄却・2026-07-18 追加）。sustain 成立後 150ms の確認窓で
+  // 咳・くしゃみ等の破裂音を棄却する（写真は look-back で取りこぼさない）。
+  confirmWindowMs: 150,
   // 2026-07-07 実測フィードバックにより 4s → 8s（RMS・STT・重心で共有）。
   cooldownMs: 8000,
   // 基準レベルの2段階化（改良1・発話基準）。
@@ -257,6 +280,18 @@ export interface RmsTriggerState {
   speechAccumMs: number;
   /** Phase 2 の発話中央値（直近20秒・dB）。窓が空なら null。デバッグ表示用。 */
   speechMedianDb: number | null;
+
+  // --- スパイク棄却＝発火確認窓（2026-07-18 追加）-----------------------------
+  /**
+   * 発火確認窓の途中か（sustain 成立で発火を保留し、非発話へ落ちないか確認している状態）。
+   * true の間は「確認窓中（発火保留）」。デバッグパネル表示用。
+   */
+  pendingConfirm: boolean;
+  /**
+   * 確認窓の間に非発話へ落ちて発火を破棄した回数（スパイク棄却の累計）。
+   * デバッグパネル・計測ログの効果測定用（C1台本の破裂音対策の効き具合）。
+   */
+  spikeRejectedCount: number;
 }
 
 /**
@@ -287,6 +322,22 @@ export class RmsTrigger {
   private armed = true;
   // 現在フレームがノイズゲート（固定・2026-07-10 追加）未満か。observability 用。
   private gated = false;
+
+  // --- スパイク棄却＝発火確認窓（2026-07-18 追加）-----------------------------
+  // sustain 成立で発火を保留した「確認窓」の状態。確認窓の間に非発話へ落ちたら破棄する。
+  // 保留中は発火時点の値（atMs=sustain成立時刻・rmsDb/rmsRise/baselineDb）を退避しておき、
+  // 確認窓の満了時にこの値で発火する（発火タイミングは最大 confirmWindowMs 遅れるが、
+  // 写真連写は look-back リングで過去に遡って撮るため取りこぼしはない）。
+  private pending: {
+    atMs: number;
+    rmsDb: number;
+    rmsRise: number;
+    baselineDb: number;
+  } | null = null;
+  // 確認窓中に破棄した回数（累計・observability）。
+  private spikeRejectedCount = 0;
+  // 直近の push で破棄が発生したか（index.ts が計測ログ event 記録のため consume する）。
+  private spikeRejectedFlag = false;
 
   // --- 基準レベルの2段階化（改良1・発話基準）--------------------------------
   // 発話ゲート用のノイズフロア推定（audioPipeline から setNoiseFloorDb で反映）。
@@ -375,6 +426,13 @@ export class RmsTrigger {
     if (this.gated || rmsDb < this.p.vadFloorDb) {
       this.sustainedMs = 0;
       this.armed = true;
+      // スパイク棄却（2026-07-18）: 確認窓の途中で非発話（ノイズゲート割れ or VAD床割れ）へ
+      // 落ちたら、咳・くしゃみ等の破裂音とみなして発火を破棄する。
+      if (this.pending !== null) {
+        this.pending = null;
+        this.spikeRejectedCount += 1;
+        this.spikeRejectedFlag = true;
+      }
       return null;
     }
 
@@ -449,6 +507,17 @@ export class RmsTrigger {
       this.sustainedMs = 0;
     }
 
+    // --- 発火確認窓（スパイク棄却・2026-07-18）: 保留中は確認窓の満了を待つ -------
+    // ここへ到達しているのは「発話フレーム（ノイズゲート・VAD床を通過）」のとき。
+    // すなわち確認窓の間ずっと発話が続いている状態。満了したら発火を確定する。
+    // （非発話へ落ちた場合は上の gated/vad 分岐で pending を破棄済み。）
+    if (this.pending !== null) {
+      if (nowMs - this.pending.atMs >= this.p.confirmWindowMs) {
+        return this.commitPendingFire(nowMs);
+      }
+      return null; // まだ確認窓の途中
+    }
+
     // --- クールダウン中は発火しない（baseline / 持続の更新は続ける） ------------
     if (nowMs < this.cooldownUntilMs) {
       return null;
@@ -460,21 +529,66 @@ export class RmsTrigger {
       return null;
     }
 
-    // --- 発火判定: 持続が閾値に達したら発火 -------------------------------------
+    // --- 発火判定: 持続が閾値に達したら確認窓を張る（または即発火） --------------
     if (this.sustainedMs >= this.p.sustainMs) {
-      this.cooldownUntilMs = nowMs + this.p.cooldownMs;
-      this.sustainedMs = 0;
-      this.triggerCount += 1;
-      this.armed = false; // リアーム解除: rise が閾値未満に戻るまで再発火しない
-      return {
+      if (this.p.confirmWindowMs <= 0) {
+        // 確認窓なし（後方互換）: 従来どおり sustain 成立で即発火する。
+        return this.fireImmediate(nowMs, rmsDb, rise, this.baselineDb);
+      }
+      // スパイク棄却: 即発火せず confirmWindowMs の確認窓を張って発火を保留する。
+      // この後のフレームで非発話へ落ちたら破棄（gated/vad 分岐）、続けば満了時に発火。
+      this.pending = {
+        atMs: nowMs,
         rmsDb,
         rmsRise: rise,
-        reason: "rms",
         baselineDb: this.baselineDb,
       };
+      return null;
     }
 
     return null;
+  }
+
+  /** 確認窓を通過した保留発火を確定する（スパイク棄却・2026-07-18）。 */
+  private commitPendingFire(nowMs: number): RmsTriggerEvent {
+    const p = this.pending!;
+    this.pending = null;
+    this.cooldownUntilMs = nowMs + this.p.cooldownMs;
+    this.sustainedMs = 0;
+    this.triggerCount += 1;
+    this.armed = false; // リアーム解除: rise が閾値未満に戻るまで再発火しない
+    return {
+      rmsDb: p.rmsDb,
+      rmsRise: p.rmsRise,
+      reason: "rms",
+      baselineDb: p.baselineDb,
+    };
+  }
+
+  /** 確認窓なし（confirmWindowMs<=0）の即時発火（後方互換）。 */
+  private fireImmediate(
+    nowMs: number,
+    rmsDb: number,
+    rise: number,
+    baselineDb: number
+  ): RmsTriggerEvent {
+    this.cooldownUntilMs = nowMs + this.p.cooldownMs;
+    this.sustainedMs = 0;
+    this.triggerCount += 1;
+    this.armed = false;
+    return { rmsDb, rmsRise: rise, reason: "rms", baselineDb };
+  }
+
+  /**
+   * 直近の push で確認窓中の破棄（スパイク棄却）が発生したかを取り出す（消費すると false へ）。
+   * index.ts が push 直後に呼び、true なら計測ログへ spike_rejected イベントを記録する。
+   */
+  consumeSpikeRejected(): boolean {
+    if (this.spikeRejectedFlag) {
+      this.spikeRejectedFlag = false;
+      return true;
+    }
+    return false;
   }
 
   /** 観測用の内部状態スナップショット。 */
@@ -500,6 +614,8 @@ export class RmsTrigger {
       mode: this.mode,
       speechAccumMs: this.speechAccumMs,
       speechMedianDb: this.speechMedian.median(),
+      pendingConfirm: this.pending !== null,
+      spikeRejectedCount: this.spikeRejectedCount,
     };
   }
 

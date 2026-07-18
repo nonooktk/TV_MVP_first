@@ -23,6 +23,15 @@ import { RollingMedian } from "./rmsTrigger";
 
 /** スペクトル重心トリガーのパラメータ（支給初期値。チューニングは検収対象外）。 */
 export interface CentroidTriggerParams {
+  /**
+   * 発火経路の有効/無効（2026-07-18 Round 1 実測に基づき既定 false＝停止）。
+   * false のときは、中央値窓・sample()/snapshot()（＝計測ログ用の観測）は従来どおり
+   * 更新し続けるが、**発火（push の戻り値イベント）は一切返さない**。
+   * Round 1 分析で重心トリガーは誤発火の 78%（通常発話の 92% の時間で基準比 1.3 を超過＝
+   * 特徴量として不成立）だったため、発火だけを止めて計測は継続する（Phase B 再設計の材料）。
+   * パラメータで再有効化できる（enabled:true を渡す）。
+   */
+  enabled: boolean;
   /** サンプル間隔の想定値（ms）。持続の時間換算に使う。 */
   sampleIntervalMs: number;
   /** 基準（発話重心中央値）のローリング窓（ms）。改良1と同じ20秒。 */
@@ -41,6 +50,10 @@ export interface CentroidTriggerParams {
  * ※ チューニングは検収対象外（実測で調整する前提）。
  */
 export const DEFAULT_CENTROID_PARAMS: CentroidTriggerParams = {
+  // 2026-07-18（Round 1 実測）: 既定で発火経路を停止する（計測は継続）。
+  // 重心は通常発話の 92% の時間で基準比 1.3 を超え、誤発火の 78% を占めた＝
+  // 音圧と独立の特徴量として現状は成立していないため、Phase B で再設計するまで停止する。
+  enabled: false,
   sampleIntervalMs: 50,
   medianWindowMs: 20000, // 改良1の発話中央値窓と同じ20秒
   // 基準比 +30%（CENTROID_RISE_RATIO）。2026-07-07 実測フィードバックにより +20%→+30%。
@@ -164,7 +177,10 @@ export class CentroidTrigger {
       return null;
     }
 
-    if (this.sustainedMs >= this.p.sustainMs) {
+    // 発火経路が有効なときのみ発火する（enabled=false＝停止中は計測のみ継続し発火しない）。
+    // enabled=false のときは sustainedMs をリセットせず積み続ける（sample()/snapshot() を通じた
+    // 計測ログの観測は継続する。停止＝発火しないだけ・2026-07-18 Round 1）。
+    if (this.p.enabled && this.sustainedMs >= this.p.sustainMs) {
       this.sustainedMs = 0;
       this.armed = false; // リアーム解除: 比率が閾値未満に戻るまで再発火しない
       return {

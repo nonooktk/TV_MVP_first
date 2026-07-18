@@ -175,6 +175,11 @@ export interface DetectionHandle {
   clearMeasurementLog: () => void;
   /** 計測ログの現在の記録件数（デバッグパネルの小表示用）。 */
   measurementLogCounts: () => { samples: number; events: number };
+  /**
+   * シナリオマーカーを計測ログへ打刻する（Round 2 の集計自動化・2026-07-18 追加）。
+   * 計測UIの「打刻」ボタンから呼ぶ。label は A1〜C3 または自由入力文字列。
+   */
+  recordMarker: (label: string) => void;
 }
 
 /** window.__detection（テスト・観測用フック）の型。 */
@@ -246,6 +251,10 @@ export interface DetectionRuntimeState {
     noiseGateDb: number;
     /** 現在フレームがノイズゲート未満（完全な無音）か。2026-07-10 追加。デバッグパネル用。 */
     gated: boolean;
+    /** 発火確認窓の途中（発火保留中）か。スパイク棄却・2026-07-18 追加。デバッグパネル用。 */
+    pendingConfirm: boolean;
+    /** 確認窓中に破棄した発火の累計回数（スパイク棄却）。2026-07-18 追加。デバッグパネル用。 */
+    spikeRejectedCount: number;
   };
   /** スペクトル重心トリガー（改良2）の状態。デバッグパネル用。 */
   centroid: {
@@ -733,6 +742,10 @@ export function attachDetection(opts: AttachDetectionOptions): DetectionHandle {
     const s = rmsTrigger.sample();
     lastGatedElder = s.gated; // ノイズゲート未満なら onCentroid へも isSpeech=false で伝える。
     measurementObserveRms(s.rmsRise, s.gated, nowMs);
+    // スパイク棄却（発火確認窓で破棄・2026-07-18）: 破棄が起きたら計測ログへ記録する。
+    if (rmsTrigger.consumeSpikeRejected()) {
+      measurementLog.recordSpikeRejected(nowMs, "elder");
+    }
     if (ev) {
       void handleTrigger(ev);
     }
@@ -775,6 +788,10 @@ export function attachDetection(opts: AttachDetectionOptions): DetectionHandle {
     const s = familyRmsTrigger.sample();
     lastFamilyGated = s.gated;
     measurementObserveFamilyRms(s.rmsRise, nowMs);
+    // スパイク棄却（発火確認窓で破棄・2026-07-18）: family レーンの破棄も記録する。
+    if (familyRmsTrigger.consumeSpikeRejected()) {
+      measurementLog.recordSpikeRejected(nowMs, "family");
+    }
     if (ev) {
       void handleTrigger(ev, undefined, undefined, "family");
     }
@@ -838,6 +855,8 @@ export function attachDetection(opts: AttachDetectionOptions): DetectionHandle {
         centroid: centroidTrigger.snapshot(),
         noiseFloorDb: lastNoiseFloorDb,
         autoGainDb: currentAutoGainDb(),
+        // 顔トリガーの本人ベースライン（face_baseline・2026-07-18）。顔検知なしなら null。
+        faceBaseline: faceTrigger ? faceTrigger.snapshot().baseline : null,
       },
       nowMs
     );
@@ -958,6 +977,8 @@ export function attachDetection(opts: AttachDetectionOptions): DetectionHandle {
         speechMedianDb: rms.speechMedianDb,
         noiseGateDb: rms.noiseGateDb,
         gated: rms.gated,
+        pendingConfirm: rms.pendingConfirm,
+        spikeRejectedCount: rms.spikeRejectedCount,
       },
       centroid: (() => {
         const c = centroidTrigger.snapshot();
@@ -1057,6 +1078,7 @@ export function attachDetection(opts: AttachDetectionOptions): DetectionHandle {
     exportMeasurementLog: () => measurementLog.toExport(),
     clearMeasurementLog: () => measurementLog.clear(),
     measurementLogCounts: () => measurementLog.counts(),
+    recordMarker: (label: string) => measurementLog.recordMarker(label, Date.now()),
   };
 }
 

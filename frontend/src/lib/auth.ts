@@ -22,8 +22,13 @@ import type {
 // 空文字なら Entra 無効（＝二段構えの dev トークン動作）。
 const CLIENT_ID = process.env.NEXT_PUBLIC_ENTRA_CLIENT_ID ?? "";
 
-// マルチテナント＋個人 MSA（サインイン対象 = AzureADandPersonalMicrosoftAccount）。
-const AUTHORITY = "https://login.microsoftonline.com/common";
+// サインイン先テナント（authority）。環境変数を優先し、未設定時は common
+// （マルチテナント＋個人 MSA。サインイン対象 = AzureADandPersonalMicrosoftAccount）にフォールバックする。
+// 検証期間はシングルテナント運用のため、テナント固定URL
+// （https://login.microsoftonline.com/{tenantId} または {tenantDomain}）を
+// NEXT_PUBLIC_ENTRA_AUTHORITY に設定できる。
+const AUTHORITY =
+  process.env.NEXT_PUBLIC_ENTRA_AUTHORITY || "https://login.microsoftonline.com/common";
 
 /** Entra が有効か（クライアントID が設定されているか）。 */
 export function isEntraEnabled(): boolean {

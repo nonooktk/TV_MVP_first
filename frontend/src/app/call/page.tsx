@@ -63,6 +63,15 @@ const SELECT_POLL_TIMEOUT_MS = 30000;
 // 表示中でも画面タップで即ホームへ戻れる。
 const NO_MEMORIES_NOTICE_MS = 3000;
 
+// シナリオマーカー（Round 2 の集計自動化・2026-07-18）のセレクト候補。
+// A1〜A7・B1〜B8・C1〜C3。末尾の "自由入力" を選ぶと隣のテキスト入力を打刻する。
+const SCENARIO_MARKERS: string[] = [
+  "A1", "A2", "A3", "A4", "A5", "A6", "A7",
+  "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8",
+  "C1", "C2", "C3",
+  "自由入力",
+];
+
 type Phase =
   | "connecting"
   | "in_call"
@@ -123,6 +132,12 @@ function CallPageInner() {
     samples: number;
     events: number;
   } | null>(null);
+  // シナリオマーカー（Round 2 の集計自動化・2026-07-18）: セレクトの選択値と自由入力値。
+  const [markerSelect, setMarkerSelect] = useState<string>(SCENARIO_MARKERS[0]);
+  const [markerFree, setMarkerFree] = useState<string>("");
+  // 直近に打刻したラベル（打刻の手応えフィードバック用・数秒だけ表示）。
+  const [markedLabel, setMarkedLabel] = useState<string | null>(null);
+  const markedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const remoteRef = useRef<HTMLDivElement | null>(null);
   const localRef = useRef<HTMLDivElement | null>(null);
@@ -260,6 +275,7 @@ function CallPageInner() {
       localAudioTrackRef.current = null;
       localVideoTrackRef.current = null;
       if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+      if (markedTimerRef.current) clearTimeout(markedTimerRef.current);
       handle?.leave();
     };
   }, [callId, attempt, onRemoteTrack]);
@@ -402,6 +418,18 @@ function CallPageInner() {
     detectionRef.current?.clearMeasurementLog();
     setMeasurementCounts(detectionRef.current?.measurementLogCounts() ?? null);
   }, []);
+
+  // 「打刻」: 選択中（または自由入力）のシナリオラベルを計測ログの events に marker として記録する。
+  const handleMarker = useCallback(() => {
+    const label =
+      markerSelect === "自由入力" ? markerFree.trim() : markerSelect;
+    if (!label) return; // 自由入力が空なら何もしない
+    detectionRef.current?.recordMarker(label);
+    setMarkedLabel(label);
+    setMeasurementCounts(detectionRef.current?.measurementLogCounts() ?? null);
+    if (markedTimerRef.current) clearTimeout(markedTimerRef.current);
+    markedTimerRef.current = setTimeout(() => setMarkedLabel(null), 2000);
+  }, [markerSelect, markerFree]);
 
   // 計測UI（📊ログ常設ボタン・ホームの回収セクション）の表示可否。
   // NEXT_PUBLIC_MEASUREMENT_UI="1" のときのみ表示（未設定なら非表示）。
@@ -653,6 +681,47 @@ function CallPageInner() {
         </button>
       )}
 
+      {/* シナリオ打刻（Round 2 の集計自動化・2026-07-18）: セレクト（A1〜C3・自由入力）＋
+          「打刻」ボタン。押すと計測ログの events に {type:"marker", label} を記録する。
+          NEXT_PUBLIC_MEASUREMENT_UI=1 のときのみ表示。通話の邪魔にならない小ささ。 */}
+      {measurementUiEnabled && (
+        <div data-testid="scenario-marker" style={scenarioMarkerStyle}>
+          <select
+            data-testid="scenario-marker-select"
+            value={markerSelect}
+            onChange={(e) => setMarkerSelect(e.target.value)}
+            style={scenarioMarkerSelectStyle}
+            title="打刻するシナリオを選ぶ"
+          >
+            {SCENARIO_MARKERS.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+          {markerSelect === "自由入力" && (
+            <input
+              data-testid="scenario-marker-free"
+              value={markerFree}
+              onChange={(e) => setMarkerFree(e.target.value)}
+              placeholder="ラベル"
+              style={scenarioMarkerInputStyle}
+            />
+          )}
+          <button
+            data-testid="scenario-marker-stamp"
+            onClick={handleMarker}
+            style={scenarioMarkerButtonStyle}
+            title="現在時刻でシナリオを打刻する"
+          >
+            打刻
+          </button>
+          {markedLabel && (
+            <span style={{ color: "#6f6", fontSize: 10 }}>✓ {markedLabel}</span>
+          )}
+        </div>
+      )}
+
       {/* 統合デバッグパネル: 発火・パラメータ・表情・STT・写真・自分側マイクをライブ表示。 */}
       {panelOpen && (
         <DebugPanel
@@ -721,6 +790,12 @@ function DebugPanel({
         ["armed", rms == null ? "—" : rms.armed ? "済" : "未（高止まり中）"],
         // ノイズゲート（固定 -50dB・2026-07-10 追加）: 現在フレームがゲート未満か。
         ["gated（ノイズゲート）", rms == null ? "—" : rms.gated ? "YES（無音扱い）" : "no"],
+        // スパイク棄却（発火確認窓・2026-07-18）: 確認窓の途中か／破棄した累計回数。
+        [
+          "confirm窓",
+          rms == null ? "—" : rms.pendingConfirm ? "確認中（発火保留）" : "no",
+        ],
+        ["spike棄却", rms == null ? "—" : String(rms.spikeRejectedCount)],
         ["busy", state?.busy ? "YES" : "no"],
         ["triggers", String(state?.triggerCount ?? 0)],
       ],
@@ -741,6 +816,8 @@ function DebugPanel({
               })`,
         ],
         ["sustainMs", `${P.sustainMs}ms`],
+        // 発火確認窓（スパイク棄却・2026-07-18）。
+        ["confirmWindowMs", `${P.confirmWindowMs}ms`],
         ["cooldownMs", `${(P.cooldownMs / 1000).toFixed(0)}s`],
         ["vadFloor(動的)", rms?.vadFloorDb == null ? "—" : `${fmt(rms.vadFloorDb)}dB`],
         [
@@ -783,8 +860,14 @@ function DebugPanel({
     ],
     [
       // スペクトル重心トリガー（改良2）: 現在値/基準/上昇率/持続。
+      // 2026-07-18（Round 1 実測）: 発火経路は既定停止（計測のみ継続）。
       "重心（声色）",
       [
+        // 停止中（計測のみ）: enabled=false なので発火はしないが観測値の記録は続く。
+        [
+          "状態",
+          DEFAULT_CENTROID_PARAMS.enabled ? "有効" : "停止中（計測のみ）",
+        ],
         [
           "重心",
           centroid?.lastCentroidHz == null
@@ -882,6 +965,13 @@ function DebugPanel({
           state?.faceTrigger == null
             ? "—"
             : `${state.faceTrigger.threshold.toFixed(2)}`,
+        ],
+        // 本人ベースライン（直近10秒中央値）＋発火に必要な上昇差（2026-07-18「変化」化）。
+        [
+          "baseline",
+          state?.faceTrigger?.baseline == null
+            ? "—"
+            : `${state.faceTrigger.baseline.toFixed(2)} (+${DEFAULT_FACE_TRIGGER_PARAMS.riseDelta}で発火)`,
         ],
         [
           "持続",
@@ -1035,6 +1125,51 @@ const measurementQuickButtonStyle: CSSProperties = {
   fontSize: 10,
   lineHeight: 1.2,
   padding: "3px 8px",
+  cursor: "pointer",
+};
+
+// シナリオ打刻 UI（左下・📊ログボタンの少し上）。通話の邪魔にならない小ささ。
+const scenarioMarkerStyle: CSSProperties = {
+  position: "absolute",
+  left: 8,
+  bottom: 32,
+  zIndex: 21,
+  display: "flex",
+  alignItems: "center",
+  gap: 4,
+  background: "rgba(0,0,0,0.5)",
+  border: "1px solid rgba(255,255,255,0.25)",
+  borderRadius: 6,
+  padding: "3px 6px",
+};
+
+const scenarioMarkerSelectStyle: CSSProperties = {
+  background: "rgba(0,0,0,0.4)",
+  color: "rgba(255,255,255,0.85)",
+  border: "1px solid rgba(255,255,255,0.25)",
+  borderRadius: 4,
+  fontSize: 11,
+  padding: "1px 2px",
+};
+
+const scenarioMarkerInputStyle: CSSProperties = {
+  width: 64,
+  background: "rgba(0,0,0,0.4)",
+  color: "rgba(255,255,255,0.85)",
+  border: "1px solid rgba(255,255,255,0.25)",
+  borderRadius: 4,
+  fontSize: 11,
+  padding: "1px 4px",
+};
+
+const scenarioMarkerButtonStyle: CSSProperties = {
+  background: "rgba(232,115,74,0.85)",
+  color: "#fff",
+  border: "none",
+  borderRadius: 4,
+  fontSize: 11,
+  fontWeight: 700,
+  padding: "2px 8px",
   cursor: "pointer",
 };
 

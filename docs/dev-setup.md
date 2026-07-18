@@ -667,28 +667,33 @@ echo 'NEXT_PUBLIC_GOOGLE_CLIENT_ID=1079731061136-b4qeaf52n55ukqhop8ft3khg6pmf67a
 - 無効化に戻すには両環境変数を空にして配信し直す
   （例: `az containerapp update -g rg-001-gen12 -n ca-tvmvp-api --set-env-vars "GOOGLE_CLIENT_ID="`）。
 
-**(B) Entra ID（家族側ログイン）の有効化（クライアントID到着後・2026-07-06）**
+**(B) Entra ID（家族側ログイン）の有効化（クライアントID発行済み・シングルテナント運用・2026-07-10 更新）**
 
-家族側ログインは Entra ID 本実装済み（個人 Microsoft アカウント対応・SPA/PKCE）。
-ただしアプリ登録の作成は管理者待ちのため、**クライアントID を後から環境変数で注入する
-二段構え**にしてある。
+家族側ログインは Entra ID 本実装済み（SPA/PKCE）。アプリ登録は発行済みで、
+**クライアントID（公開値）`9a6338d6-b944-45bd-a603-1f0cf7ebae38`** が使える状態。
+**検証期間中はシングルテナント運用**のため、`admintech0` テナント
+（テナントID `55f735cd-b170-4cfe-91ee-0b08d30d87e8`）にのみ登録してあり、
+サインインできるのはそのテナント配下のアカウントに限られる（個人 Microsoft アカウント・
+他テナントは対象外）。
 
-- 未設定（現状）: backend `ENTRA_CLIENT_ID` 空・frontend `NEXT_PUBLIC_ENTRA_CLIENT_ID` 空。
+- 未設定（backend `ENTRA_CLIENT_ID` 空・frontend `NEXT_PUBLIC_ENTRA_CLIENT_ID` 空）:
   → ログイン UI は出ず、家族側は開発用固定トークン（`DEV_FAMILY_TOKEN`）のみで動作する
   （既存の pytest / Playwright / デモは無変更で通る）。
 - 設定後（有効化）: 家族側は「Microsoft でサインイン」画面 → ログインして利用。
   初回ログイン時にその auth_id 用の家族＋owner ユーザーが自動作成される。
   開発用固定トークンは併存（テスト家族限定の裏口。本番前に無効化する）。
+- サインイン先テナント（authority）は `frontend/src/lib/auth.ts` の
+  `NEXT_PUBLIC_ENTRA_AUTHORITY` で切替可能（**2026-07-10 追加**）。未設定時は既定
+  `https://login.microsoftonline.com/common`（マルチテナント＋個人 MSA）にフォールバックする。
+  **シングルテナント運用中はテナント固定URLを設定する**（下記手順）。
 
-前提: 管理者が Entra でアプリ登録を作成し、次を満たすこと。
-- サインインできるアカウントの種類 = **個人 Microsoft アカウントを含む任意の組織ディレクトリ**
-  （`AzureADandPersonalMicrosoftAccount`）。
+アプリ登録の設定（発行済み・参考）:
+- サインインできるアカウントの種類 = **この組織ディレクトリのみ**（シングルテナント）。
 - プラットフォーム = **SPA（PKCE）**。リダイレクト URI に各環境のオリジンを登録:
   `http://localhost:3000`（ローカル）と SWA の URL（本番）。
-- 「API の公開」で **アプリ ID URI = `api://<CLIENT_ID>`**、スコープ **`access_as_user`** を追加。
-  そのスコープをこの SPA クライアント自身に事前同意（Authorized client applications）しておく。
-
-到着したクライアントID（アプリケーション（クライアント）ID）を `CLIENT_ID` として使う。
+- 「API の公開」で **アプリ ID URI = `api://9a6338d6-b944-45bd-a603-1f0cf7ebae38`**、
+  スコープ **`access_as_user`** を追加。そのスコープをこの SPA クライアント自身に
+  事前同意（Authorized client applications）済み。
 
 **(1) backend を有効化（`ENTRA_CLIENT_ID` を設定して再起動）**
 
@@ -696,7 +701,7 @@ echo 'NEXT_PUBLIC_GOOGLE_CLIENT_ID=1079731061136-b4qeaf52n55ukqhop8ft3khg6pmf67a
 
 ```bash
 cd /Users/mitsuru/Desktop/MyDocs/outputs/TV_MVP/backend
-echo 'ENTRA_CLIENT_ID=<CLIENT_ID>' >> .env   # 値を注入（クライアントIDは公開値）
+echo 'ENTRA_CLIENT_ID=9a6338d6-b944-45bd-a603-1f0cf7ebae38' >> .env   # クライアントIDは公開値
 # uvicorn を再起動すると、dev トークン以外の Bearer を Entra トークンとして検証する
 .venv/bin/uvicorn app.main:app --reload --port 8000
 ```
@@ -705,19 +710,26 @@ echo 'ENTRA_CLIENT_ID=<CLIENT_ID>' >> .env   # 値を注入（クライアント
 
 ```bash
 az containerapp update -g rg-001-gen12 -n ca-tvmvp-api \
-  --set-env-vars "ENTRA_CLIENT_ID=<CLIENT_ID>"
+  --set-env-vars "ENTRA_CLIENT_ID=9a6338d6-b944-45bd-a603-1f0cf7ebae38"
 ```
 
-**(2) frontend を有効化（`NEXT_PUBLIC_ENTRA_CLIENT_ID` を埋め込んでビルド → SWA へ配信）**
+**(2) frontend を有効化（`NEXT_PUBLIC_ENTRA_CLIENT_ID` と `NEXT_PUBLIC_ENTRA_AUTHORITY`
+〈テナント固定URL〉を埋め込んでビルド → SWA へ配信）**
 
 `NEXT_PUBLIC_*` はビルド時に静的に埋め込まれるため、**設定して `next build` し直す**必要がある
-（§13-3 と同じ配信手順。API URL も併せて埋め込む）:
+（§13-3 と同じ配信手順。API URL も併せて埋め込む）。`frontend/.env.production` に
+次の2行を設定してからビルドする（ファイルへの値設定は権限保護のためユーザーが実施する）:
+
+```
+NEXT_PUBLIC_ENTRA_CLIENT_ID=9a6338d6-b944-45bd-a603-1f0cf7ebae38
+NEXT_PUBLIC_ENTRA_AUTHORITY=https://login.microsoftonline.com/55f735cd-b170-4cfe-91ee-0b08d30d87e8
+```
 
 ```bash
 cd /Users/mitsuru/Desktop/MyDocs/outputs/TV_MVP/frontend
 
-# NEXT_PUBLIC_ENTRA_CLIENT_ID は frontend/.env.production の該当行に <CLIENT_ID> を設定してから
-# ビルドする（公開値・ファイル読込方式）。API URL も .env.production から自動読込される。
+# NEXT_PUBLIC_ENTRA_CLIENT_ID / NEXT_PUBLIC_ENTRA_AUTHORITY / API URL は
+# .env.production から自動読込される。
 npx next build      # out/ に生成される
 
 TOKEN=$(az staticwebapp secrets list -g rg-001-gen12 -n swa-tvmvp-73bb \
@@ -726,24 +738,36 @@ npx --yes @azure/static-web-apps-cli deploy ./out \
   --deployment-token "$TOKEN" --env production
 ```
 
-ローカルで有効化して動かす場合は `frontend/.env.local` に1行追記して `npm run dev`:
+ローカルで有効化して動かす場合は `frontend/.env.local` に同じ2行を追記して `npm run dev`:
 
 ```bash
-echo 'NEXT_PUBLIC_ENTRA_CLIENT_ID=<CLIENT_ID>' >> frontend/.env.local
+echo 'NEXT_PUBLIC_ENTRA_CLIENT_ID=9a6338d6-b944-45bd-a603-1f0cf7ebae38' >> frontend/.env.local
+echo 'NEXT_PUBLIC_ENTRA_AUTHORITY=https://login.microsoftonline.com/55f735cd-b170-4cfe-91ee-0b08d30d87e8' >> frontend/.env.local
 ```
 
-> 本番（SWA）は `.env.local` ではなく `.env.production` を読む。到着した `<CLIENT_ID>` を
-> `frontend/.env.production` の `NEXT_PUBLIC_ENTRA_CLIENT_ID=` 行に設定して再ビルド・配信する。
+> 本番（SWA）は `.env.local` ではなく `.env.production` を読む。`frontend/.env.production` の
+> `NEXT_PUBLIC_ENTRA_CLIENT_ID=` と `NEXT_PUBLIC_ENTRA_AUTHORITY=` の2行を設定して
+> 再ビルド・配信する。
 
 **(3) 確認**
 
 - frontend を開くと家族側は「Microsoft でサインイン」画面になる。サインイン後、ホームに
   ユーザー名とログアウトが表示される。以降の API 呼び出しは Entra アクセストークンで通る。
+- サインインできるのは `admintech0` テナント配下のアカウントのみ（シングルテナント登録の
+  ため）。テナント外のアカウントでサインインしようとすると Microsoft 側の画面でエラーになる。
 - 開発用固定トークン（`dev-fixed-token`）も引き続き 200 を返す（併存の裏口）。
 - 無効化に戻すには、両環境変数を空にして（backend は再起動、frontend は再ビルド）配信し直す。
 
 > 無効化（切り戻し）例（クラウド backend）:
 > `az containerapp update -g rg-001-gen12 -n ca-tvmvp-api --set-env-vars "ENTRA_CLIENT_ID="`
+
+**マルチテナント移行時の注記**: 検証を抜けて個人 Microsoft アカウント／他テナントにも
+開放する場合は、次の**両方**を実施する（片方だけでは機能しない）。
+1. Entra 側のアプリ登録で「サインインできるアカウントの種類」をシングルテナントから
+   **個人 Microsoft アカウントを含む任意の組織ディレクトリ**（`AzureADandPersonalMicrosoftAccount`）
+   へ変更する。
+2. `frontend/.env.production` の `NEXT_PUBLIC_ENTRA_AUTHORITY` を空に戻す
+   （既定の `https://login.microsoftonline.com/common` にフォールバックする）→ 再ビルド・配信。
 
 ## 停止・クリーンアップ
 

@@ -12,6 +12,8 @@ import {
   MAX_SAMPLES,
   MeasurementLog,
   SAMPLE_INTERVAL_MS,
+  type MeasurementEvent,
+  type MeasurementTriggerEvent,
 } from "../src/modules/detection/measurementLog";
 import { DEFAULT_RMS_PARAMS, type RmsTriggerState } from "../src/modules/detection/rmsTrigger";
 import {
@@ -40,8 +42,16 @@ function rmsSnapshot(overrides: Partial<RmsTriggerState> = {}): RmsTriggerState 
     mode: "provisional",
     speechAccumMs: 0,
     speechMedianDb: null,
+    pendingConfirm: false,
+    spikeRejectedCount: 0,
     ...overrides,
   };
+}
+
+/** events を trigger イベントに絞り込むヘルパ（events は union のため）。 */
+function asTrigger(ev: MeasurementEvent): MeasurementTriggerEvent {
+  if (ev.type !== "trigger") throw new Error(`trigger event ではない: ${ev.type}`);
+  return ev;
 }
 
 /** テスト用のダミー CentroidTriggerState。 */
@@ -145,8 +155,10 @@ describe("MeasurementLog", () => {
     }
     const exported = log.toExport();
     expect(exported.events).toHaveLength(MAX_EVENTS);
-    expect(exported.events[0].rms.lastRmsDb).toBe(5);
-    expect(exported.events[exported.events.length - 1].rms.lastRmsDb).toBe(total - 1);
+    expect(asTrigger(exported.events[0]).rms.lastRmsDb).toBe(5);
+    expect(asTrigger(exported.events[exported.events.length - 1]).rms.lastRmsDb).toBe(
+      total - 1
+    );
   });
 
   it("シリアライズ: toExport() が version/call_id/exported_at/params/samples/events を持つ", () => {
@@ -175,21 +187,22 @@ describe("MeasurementLog", () => {
 
     let exported = log.toExport();
     expect(exported.events).toHaveLength(1);
-    const ev = exported.events[0];
+    const ev = asTrigger(exported.events[0]);
     expect(ev.type).toBe("trigger");
     expect(ev.reason).toBe("centroid");
     expect(ev.t).toBe(5); // elapsed sec = (5000-0)/1000
     expect(ev.rms).toEqual(rms);
     expect(ev.centroid).toEqual(centroid);
     expect(ev.auto_gain_db).toBe(6.5);
+    expect(ev.source).toBe("elder"); // 省略時は elder 既定
     // 完了前は未確定。
     expect(ev.photo_count).toBeNull();
     expect(ev.partial_save).toBe(false);
 
     log.recordTriggerComplete(8, true);
     exported = log.toExport();
-    expect(exported.events[0].photo_count).toBe(8);
-    expect(exported.events[0].partial_save).toBe(true);
+    expect(asTrigger(exported.events[0]).photo_count).toBe(8);
+    expect(asTrigger(exported.events[0]).partial_save).toBe(true);
   });
 
   it("recordTriggerComplete は直近の未完了イベントのみを更新する（複数発火の取り違えがない）", () => {
@@ -201,10 +214,10 @@ describe("MeasurementLog", () => {
 
     const exported = log.toExport();
     expect(exported.events).toHaveLength(2);
-    expect(exported.events[0].reason).toBe("rms");
-    expect(exported.events[0].photo_count).toBe(3);
-    expect(exported.events[1].reason).toBe("stt");
-    expect(exported.events[1].photo_count).toBe(5);
+    expect(asTrigger(exported.events[0]).reason).toBe("rms");
+    expect(asTrigger(exported.events[0]).photo_count).toBe(3);
+    expect(asTrigger(exported.events[1]).reason).toBe("stt");
+    expect(asTrigger(exported.events[1]).photo_count).toBe(5);
   });
 
   it("counts() が現在の samples/events 件数を返す（デバッグパネルの小表示用）", () => {
@@ -216,6 +229,84 @@ describe("MeasurementLog", () => {
     );
     log.recordTriggerStart("rms", rmsSnapshot(), centroidSnapshot(), null, 1000);
     expect(log.counts()).toEqual({ samples: 1, events: 1 });
+  });
+
+  // --- 2026-07-18 Round 1 再構成: 重心中央値・face_baseline・スパイク棄却・マーカー ---
+
+  it("centroid_ratio_median: その1秒間の基準比の中央値（平滑値）をピークと併記する", () => {
+    const log = new MeasurementLog("call-1", PARAMS, 0);
+    // 基準比が 1.0, 1.2, 1.4, 1.6, 3.0 と観測される（3.0 は突出したピーク）。
+    log.observeFrame({ riseDb: null, isSpeech: true, centroidRatio: 1.0 }, 100);
+    log.observeFrame({ riseDb: null, isSpeech: true, centroidRatio: 1.2 }, 200);
+    log.observeFrame({ riseDb: null, isSpeech: true, centroidRatio: 1.4 }, 300);
+    log.observeFrame({ riseDb: null, isSpeech: true, centroidRatio: 1.6 }, 400);
+    log.observeFrame({ riseDb: null, isSpeech: true, centroidRatio: 3.0 }, 500);
+    log.tick(
+      { rms: rmsSnapshot(), centroid: centroidSnapshot(), noiseFloorDb: null, autoGainDb: null },
+      1000
+    );
+    const sample = log.toExport(1000).samples[0];
+    // ピークは最大（3.0）、中央値は突出値に引きずられない（[1.0,1.2,1.4,1.6,3.0] の中央=1.4）。
+    expect(sample.centroid_ratio_peak).toBe(3.0);
+    expect(sample.centroid_ratio_median).toBe(1.4);
+  });
+
+  it("face_baseline: tick の faceBaseline が1秒毎の現在値として記録される（顔検知なしは null）", () => {
+    const log = new MeasurementLog("call-1", PARAMS, 0);
+    // 顔検知ありの通話: faceBaseline を渡す。
+    log.observeFaceFrame(0.9, 200);
+    log.tick(
+      {
+        rms: rmsSnapshot(),
+        centroid: centroidSnapshot(),
+        noiseFloorDb: null,
+        autoGainDb: null,
+        faceBaseline: 0.25,
+      },
+      1000
+    );
+    const s1 = log.toExport(1000).samples[0];
+    expect(s1.face_score_peak).toBe(0.9);
+    expect(s1.face_baseline).toBe(0.25);
+
+    // 顔検知なしの通話（faceBaseline 省略）: null。
+    const log2 = new MeasurementLog("call-2", PARAMS, 0);
+    log2.tick(
+      { rms: rmsSnapshot(), centroid: centroidSnapshot(), noiseFloorDb: null, autoGainDb: null },
+      1000
+    );
+    expect(log2.toExport(1000).samples[0].face_baseline).toBeNull();
+  });
+
+  it("recordSpikeRejected: スパイク棄却イベント（type:spike_rejected）を events へ記録する", () => {
+    const log = new MeasurementLog("call-1", PARAMS, 0);
+    log.recordSpikeRejected(3000, "elder");
+    log.recordSpikeRejected(5000, "family");
+    const events = log.toExport().events;
+    expect(events).toHaveLength(2);
+    expect(events[0]).toEqual({ t: 3, type: "spike_rejected", source: "elder" });
+    expect(events[1]).toEqual({ t: 5, type: "spike_rejected", source: "family" });
+  });
+
+  it("recordMarker: シナリオマーカー（type:marker）を events へ記録する", () => {
+    const log = new MeasurementLog("call-1", PARAMS, 0);
+    log.recordMarker("A1", 2000);
+    log.recordMarker("C2", 12000);
+    const events = log.toExport().events;
+    expect(events).toHaveLength(2);
+    expect(events[0]).toEqual({ t: 2, type: "marker", label: "A1" });
+    expect(events[1]).toEqual({ t: 12, type: "marker", label: "C2" });
+  });
+
+  it("spike_rejected / marker も MAX_EVENTS のリング上限に従う", () => {
+    const log = new MeasurementLog("call-1", PARAMS, 0);
+    for (let i = 0; i < MAX_EVENTS + 3; i++) {
+      log.recordMarker(`m${i}`, i * 1000);
+    }
+    const events = log.toExport().events;
+    expect(events).toHaveLength(MAX_EVENTS);
+    // 先頭3件が押し出され、先頭は m3 になっている。
+    expect(events[0]).toEqual({ t: 3, type: "marker", label: "m3" });
   });
 
   it("clear() で samples・events が空になる（「ログクリア」ボタン用）", () => {
