@@ -60,11 +60,16 @@ BGM 付きハイライト動画を生成、家族の閲覧 UI と高齢者側の
 
 ## 上位ドキュメント（このリポジトリ外・正本）
 
-- RFP: `../../materials/TV電話サービス_RFP_MVP_チーム内バージョン.docx`／
-  `同_コア技術外部委託バージョン.docx`（別紙にワイヤーフレーム v0.9）
-- 決定事項・変遷: `../../wiki/syntheses/2026-07-02-tvphone-rfp-mvp-tech-review.md`
+（2026-07-19 にリポジトリを `MyDocs/outputs/TV_MVP` から `toolmaker/apps/TV_MVP` へ移設したため、
+以下は絶対パスで参照する。正本は引き続き MyDocs 側。）
+
+- RFP: `/Users/mitsuru/Desktop/MyDocs/materials_used/TV電話サービス_RFP_MVP_コア技術外部委託バージョン.docx`
+  （旧記載の `materials/` は現存せず。v2・テンプレートは
+  `/Users/mitsuru/Desktop/MyDocs/outputs/tv-denwa-rfp/` にあり。チーム内バージョン docx は
+  2026-07-19 の移設時点で MyDocs 内に見当たらず＝所在不明。別紙にワイヤーフレーム v0.9）
+- 決定事項・変遷: `/Users/mitsuru/Desktop/MyDocs/wiki/syntheses/2026-07-02-tvphone-rfp-mvp-tech-review.md`
 - アーキテクチャ・ToDo・図（シーケンス/DFD/クラス図）:
-  `../../wiki/syntheses/2026-07-02-tvphone-mvp-architecture-todo.md`
+  `/Users/mitsuru/Desktop/MyDocs/wiki/syntheses/2026-07-02-tvphone-mvp-architecture-todo.md`
 
 ## 開発ルール
 
