@@ -40,3 +40,12 @@ ignore:
     - '*':
         reason: 'ws は next の WebSocket 経路の間接依存で直接更新経路なし。next 15 更新の別タスクで解消予定。'
         expires: 2027-01-21T00:00:00.000Z
+
+# Snyk のスキャン対象から除外するパス（秘匿値・生成物・依存物・スキャン用 venv）。
+exclude:
+  global:
+    - "**/.env*"
+    - "**/cloud.env"
+    - "frontend/out/**"
+    - "**/node_modules/**"
+    - "**/.venv*/**"

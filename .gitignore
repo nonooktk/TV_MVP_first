@@ -9,6 +9,8 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+# セキュリティスキャン用 venv（Snyk 等の検査で作る大容量 venv。コミットしない）
+.venv-scan/
 
 # 環境変数・秘匿値
 # .env は絶対にコミットしない（本番秘密はKey Vault＋マネージドIDで管理）
