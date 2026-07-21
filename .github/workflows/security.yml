@@ -1,0 +1,117 @@
+# Snyk による依存脆弱性の CI ゲート。
+# high 以上の既知脆弱性が混入した場合に CI を失敗させ、マージをブロックする。
+#
+# このファイルは github-repo-security スキルの templates/security.yml を元に生成する。
+# TV_MVP は npm=frontend / pip=backend / pip=worker の構成。pip を2ディレクトリに持つため
+# pip ジョブを複製し、ジョブ名を "Snyk (pip:backend)" / "Snyk (pip:worker)" とする。
+# ジョブ名 "Snyk (npm)" / "Snyk (pip:backend)" / "Snyk (pip:worker)" はブランチ保護の
+# Required checks（contexts）と一致させる。
+#
+# サードパーティ Action はサプライチェーン改ざん対策として完全長コミット SHA に固定する
+# （タグは後から移動されうるため）。行末コメントに対応バージョンと確認日を併記する。
+name: security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# 同一ブランチの古い実行はキャンセルして無駄な実行を減らす
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# 最小権限（読み取りのみ）
+permissions:
+  contents: read
+
+jobs:
+  # ── npm（frontend）依存のスキャン ─────────────────────────────
+  # ジョブ名 "Snyk (npm)" はブランチ保護の Required checks（contexts）と一致させる。
+  snyk-npm:
+    name: Snyk (npm)
+    runs-on: ubuntu-latest
+    # public リポジトリでは fork からの PR に SNYK_TOKEN（secrets）が渡らずジョブが必ず失敗する。
+    # そのため fork PR ではスキップし、push と同一リポジトリ内 PR のときだけ実行する。
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0 (2026-07-21 確認)
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 (2026-07-21 確認)
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # ロックファイルどおりに依存を再現（Snyk の解決精度を上げる）
+      - name: install deps
+        working-directory: frontend
+        run: npm ci
+
+      # high 以上で失敗（マージ不可）。moderate 以下は許容する。
+      - name: Snyk test (npm)
+        uses: snyk/actions/node@8e119fbb6c251787721d34ba683ed48eba792766 # master (2026-07-21 確認)
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --file=frontend/package.json --severity-threshold=high
+
+  # ── pip（backend）依存のスキャン ──────────────────────────────
+  # ジョブ名 "Snyk (pip:backend)" はブランチ保護の Required checks と一致させる。
+  snyk-pip-backend:
+    name: Snyk (pip:backend)
+    runs-on: ubuntu-latest
+    # fork PR ではスキップ（SNYK_TOKEN が渡らないため）
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0 (2026-07-21 確認)
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0 (2026-07-21 確認)
+        with:
+          # backend/Dockerfile が python:3.11 のため 3.11 に合わせる
+          python-version: "3.11"
+
+      # Snyk の pip スキャンはインストール済み環境があると解決精度が上がるため、
+      # 先に依存を導入してから requirements.txt を対象にスキャンする。
+      - name: install deps
+        run: pip install -r backend/requirements.txt
+
+      # Snyk CLI を利用（monorepo でパスを明示できるため確実）。
+      # 再現性のため CLI もバージョンを固定する（最新は `npm view snyk version` で確認）。
+      - name: install snyk cli
+        run: npm i -g snyk@1.1306.1
+
+      # high 以上で失敗（マージ不可）。
+      - name: Snyk test (pip:backend)
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: snyk test --file=backend/requirements.txt --package-manager=pip --severity-threshold=high
+
+  # ── pip（worker）依存のスキャン ───────────────────────────────
+  # ジョブ名 "Snyk (pip:worker)" はブランチ保護の Required checks と一致させる。
+  snyk-pip-worker:
+    name: Snyk (pip:worker)
+    runs-on: ubuntu-latest
+    # fork PR ではスキップ（SNYK_TOKEN が渡らないため）
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0 (2026-07-21 確認)
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0 (2026-07-21 確認)
+        with:
+          # worker/Dockerfile が python:3.11 のため 3.11 に合わせる
+          python-version: "3.11"
+
+      # Snyk の pip スキャンはインストール済み環境があると解決精度が上がるため、
+      # 先に依存を導入してから requirements.txt を対象にスキャンする。
+      - name: install deps
+        run: pip install -r worker/requirements.txt
+
+      - name: install snyk cli
+        run: npm i -g snyk@1.1306.1
+
+      # high 以上で失敗（マージ不可）。
+      - name: Snyk test (pip:worker)
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: snyk test --file=worker/requirements.txt --package-manager=pip --severity-threshold=high
