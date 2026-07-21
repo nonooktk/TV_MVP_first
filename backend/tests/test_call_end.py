@@ -87,7 +87,12 @@ def test_end_does_not_break_media_register_transition(
             "items": [
                 {
                     "type": "photo",
-                    "storage_key": f"families/x/calls/{call['id']}/candidates/a.jpg",
+                    # F-10 の storage_key 検証に合わせ、当該通話の家族プレフィックスを使う
+                    # （本テストの主眼は end API と register の ended 遷移共存であり、
+                    #  従来のダミー "families/x/..." は越境扱いで 400 になるため実プレフィックスへ）。
+                    "storage_key": (
+                        f"families/{seeded['family_id']}/calls/{call['id']}/candidates/a.jpg"
+                    ),
                     "captured_at": "2026-07-04T00:00:00Z",
                 }
             ],
