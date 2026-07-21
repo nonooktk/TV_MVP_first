@@ -23,8 +23,11 @@ class Settings(BaseSettings):
     QUEUE_NAME: str = "pipeline-jobs"
 
     # 家族側の固定 Bearer トークン（開発用の裏口。Entra 有効時も併存させる）。
-    # テスト家族限定のため、本番前に無効化する（CLAUDE.md 認証節に課題として記録）。
-    DEV_FAMILY_TOKEN: str
+    # テスト家族限定。F-3（SECURITY_REPORT_2026-07-19）対応で本番では env を除去して無効化する。
+    # そのため**デフォルトを空文字**にしておく（env 未設定でも Settings 検証を通す）。空のときは
+    # deps.require_family のガード（`settings.DEV_FAMILY_TOKEN and ...`）で dev トークン経路が
+    # 無効化され、Google/Entra のみで認証する。ローカル/テストは .env / 環境変数で従来どおり設定する。
+    DEV_FAMILY_TOKEN: str = ""
 
     # Entra ID（家族側ログイン本実装）。アプリ登録の「アプリケーション（クライアント）ID」。
     # 空（アプリ登録未作成）なら Entra 検証は行わず、dev トークンのみで動作する（二段構え）。

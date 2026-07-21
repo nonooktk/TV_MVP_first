@@ -15,7 +15,15 @@
 // 高齢者側（/elder/*）はこのゲートを使わない（認証SDKを読み込まない）。
 
 import { useEffect, useRef, useState } from "react";
-import { initAuth, isEntraEnabled, isSignedIn, login } from "../lib/auth";
+import {
+  clearMsalInteractionState,
+  formatAuthError,
+  initAuth,
+  isEntraEnabled,
+  isInteractionInProgressError,
+  isSignedIn,
+  login,
+} from "../lib/auth";
 import {
   isGoogleEnabled,
   isGoogleSignedIn,
@@ -34,6 +42,8 @@ export default function FamilyAuthGate({ children }: { children: React.ReactNode
     authEnabled ? "checking" : "signed_in"
   );
   const [signingIn, setSigningIn] = useState(false);
+  // 認証エラー全文（AADSTS コード等）。サインイン不具合の原因特定用に画面へ表示する。
+  const [authError, setAuthError] = useState<string | null>(null);
   // GIS 公式ボタンの描画先。
   const googleBtnRef = useRef<HTMLDivElement | null>(null);
 
@@ -58,9 +68,21 @@ export default function FamilyAuthGate({ children }: { children: React.ReactNode
           }
         }
         if (!cancelled) setState("signed_out");
-      } catch {
-        // 初期化失敗時はサインイン画面を出す（ユーザーが再試行できる）。
-        if (!cancelled) setState("signed_out");
+      } catch (e) {
+        // 初期化（handleRedirectPromise）の失敗。従来は握りつぶしていたが、
+        // AADSTS コード等の原因が分かるよう保持・表示し、console にも全文を出す。
+        console.error(
+          "[FamilyAuthGate] 認証初期化(handleRedirectPromise)でエラー:",
+          e
+        );
+        // interaction_in_progress の残留は次回サインインを弾くため、ここでクリアしておく。
+        if (isInteractionInProgressError(e)) {
+          clearMsalInteractionState();
+        }
+        if (!cancelled) {
+          setAuthError(formatAuthError(e));
+          setState("signed_out");
+        }
       }
     })();
     return () => {
@@ -85,9 +107,30 @@ export default function FamilyAuthGate({ children }: { children: React.ReactNode
 
   async function handleMicrosoftSignIn() {
     setSigningIn(true);
+    setAuthError(null);
     try {
       await login(); // リダイレクトが始まる（以降のコードは通常走らない）
-    } catch {
+    } catch (e) {
+      console.error("[FamilyAuthGate] サインイン開始でエラー:", e);
+      // interaction_in_progress（一時状態の残留）ならクリアして 1 回だけ自動リトライする。
+      if (isInteractionInProgressError(e)) {
+        clearMsalInteractionState();
+        try {
+          await login(); // 復旧後の再試行。成功すればリダイレクトが始まる。
+          return;
+        } catch (retryError) {
+          console.error(
+            "[FamilyAuthGate] 一時状態クリア後の再試行でもエラー:",
+            retryError
+          );
+          setAuthError(
+            `${formatAuthError(retryError)}（もう一度お試しください）`
+          );
+          setSigningIn(false);
+          return;
+        }
+      }
+      setAuthError(formatAuthError(e));
       setSigningIn(false);
     }
   }
@@ -187,6 +230,31 @@ export default function FamilyAuthGate({ children }: { children: React.ReactNode
             </button>
           )}
         </div>
+
+        {/* 認証エラー全文（AADSTS コード等）。原因特定用に赤字の小さめテキストで表示する。 */}
+        {authError && (
+          <p
+            data-testid="auth-error"
+            style={{
+              fontSize: 12,
+              lineHeight: 1.5,
+              color: "var(--color-danger, #c0392b)",
+              background: "var(--color-danger-bg, #fdecea)",
+              border: "1px solid var(--color-danger, #c0392b)",
+              borderRadius: 8,
+              padding: "10px 12px",
+              marginTop: 20,
+              marginBottom: 0,
+              textAlign: "left",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+            }}
+          >
+            サインインでエラーが発生しました:
+            {"\n"}
+            {authError}
+          </p>
+        )}
 
         <p
           style={{
