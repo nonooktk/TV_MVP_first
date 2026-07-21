@@ -77,6 +77,25 @@ def register_media(
     """
     call = _owned_call(db, body.call_id, user)
 
+    # F-10（SECURITY_REPORT_2026-07-19）対応: storage_key はサーバ側で必ず当該通話の
+    # プレフィックス配下に限定する。クライアント申告の storage_key を無検証で保存すると、
+    # 家族Bが自分の call に他家族プレフィックス（families/{家族A}/calls/.../xxx.jpg）の
+    # memory を register できてしまい、GET /calls/{id}/candidates が同 storage_key の
+    # read SAS を発行するため**他家族 Blob の read SAS を取得できる芽**が残る（F-1 の read 版）。
+    # upload-sas と同じ call_prefix ヘルパで境界を固定し、越境 read の芽を根絶する。
+    prefix = call_prefix(call.family_id, call.id)
+    for item in body.items:
+        key = item.storage_key
+        # 空・プレフィックス外・相対（".." による遡上）を弾く。
+        if not key or ".." in key or not key.startswith(prefix):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "invalid_storage_key",
+                    "message": "storage_key は当該通話のプレフィックス配下である必要があります",
+                },
+            )
+
     # 既に提示済み album があるなら重複同期。候補を汚さずに既存 memory_ids を返す。
     existing_album = db.scalars(
         select(Album).where(Album.call_id == call.id)
