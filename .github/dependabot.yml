@@ -1,0 +1,57 @@
+# Dependabot: 依存の既知脆弱性・更新を週次で自動 PR 化する。
+# minor/patch はグループ化して PR 数を抑制し、major は個別 PR として影響を精査する。
+#
+# このファイルは github-repo-security スキルの templates/dependabot.yml を元に生成する。
+# TV_MVP は npm=frontend / pip=backend / pip=worker の構成。pip を2ディレクトリに持つため
+# pip ブロックを複製し、それぞれ directory と groups 名を分ける。
+# security.yml のジョブ複製（Snyk (pip:backend) / Snyk (pip:worker)）と対になる作業。
+version: 2
+updates:
+  # ── npm（frontend）─────────────────────────────────────────────
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # ── pip（backend）─────────────────────────────────────────────
+  - package-ecosystem: pip
+    directory: /backend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      pip-minor-patch-backend:
+        update-types:
+          - minor
+          - patch
+
+  # ── pip（worker）──────────────────────────────────────────────
+  - package-ecosystem: pip
+    directory: /worker
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      pip-minor-patch-worker:
+        update-types:
+          - minor
+          - patch
+
+  # ── GitHub Actions 自体の更新（常に残す）─────────────────────
+  # security.yml で完全長 SHA 固定した action を、Dependabot が自動で更新 PR 化する。
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor-patch:
+        update-types:
+          - minor
+          - patch
