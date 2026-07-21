@@ -1,30 +1,35 @@
 # backend（FastAPI）の依存。ローカル開発・テストで実際に使う構成。
 # 本番の秘密取得（Key Vault＋マネージドID）用の azure-identity / azure-keyvault-secrets は
 # 実導入時（A1）に追加する。
+#
+# F-4（SECURITY_REPORT_2026-07-19）対応: 直接依存を検査済みの実バージョン（==）で固定し、
+# ビルドの再現性を担保する。バージョンは backend/requirements.lock.txt（検査時点の全依存の
+# pip freeze）と整合させること。extras（uvicorn[standard]／pyjwt[crypto]）の推移的依存の
+# 厳密な版は requirements.lock.txt を参照。
 
 # --- Web フレームワーク ---
-fastapi
-uvicorn[standard]
+fastapi==0.139.2
+uvicorn[standard]==0.51.0
 
 # --- Agora トークン生成（M1・A2）---
-agora-token-builder
+agora-token-builder==1.0.0
 
 # --- DB（同期 SQLAlchemy 2.0＋Alembic＋psycopg2）---
-sqlalchemy
-alembic
-psycopg2-binary
+sqlalchemy==2.0.51
+alembic==1.18.5
+psycopg2-binary==2.9.12
 
 # --- 設定読み込み（.env）---
-pydantic-settings
+pydantic-settings==2.14.2
 
 # --- Entra ID（家族側ログイン本実装）JWT 検証 ---
 # v2.0 アクセストークンの署名検証（JWKS）。crypto エクストラで RS256（cryptography）を有効化。
-pyjwt[crypto]
+pyjwt[crypto]==2.13.0
 
 # --- Azure Storage（Blob/Queue。ローカルは Azurite で実動作）---
-azure-storage-blob
-azure-storage-queue
+azure-storage-blob==12.30.0
+azure-storage-queue==12.17.0
 
 # --- テスト ---
-pytest
-httpx
+pytest==9.1.1
+httpx==0.28.1
