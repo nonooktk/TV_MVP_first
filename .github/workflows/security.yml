@@ -39,7 +39,8 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 (2026-07-21 確認)
         with:
-          node-version: 20
+          # vite 8（vitest 4 同梱）の Node 要件 ^20.19.0 || >=22.12.0 を満たす明示指定。
+          node-version: "20.19"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 

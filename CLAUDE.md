@@ -81,6 +81,39 @@ BGM 付きハイライト動画を生成、家族の閲覧 UI と高齢者側の
 - 開発期間は実働2週間。遅延時の削減優先順位は RFP 10章（①映像look-back → ②STTトリガー →
   ③visionキャプション → ④BGM → ⑤着信ポーリング → ⑥高齢者側再生 → ⑦動画生成 の順で削る）
 
+## 現在の状態（2026-07-21）
+
+- **フロントエンド依存のメジャー更新（next 15.5 / React 19 / vitest 4）＋脆弱性掃討＋.snyk 整理
+  完了（frontend のみ・ブランチ `deps/major-next15`・push 前でレビュー待ち／デプロイ未実施）**:
+  統括承認済み。security/baseline から派生し、SCA 由来の既知 high を上流更新で解消した。
+  - **Phase 1**: `next` 14.2.35 → `^15.5.20`、`react`/`react-dom` 18.3.0 → `19.2.7`（App Router のため
+    React 19 必須）、`@types/react-dom` 19.2.3 追加。lockfile は CI と同じ npm 10（Node 20 系）で
+    再生成（EUSAGE 回避。`npx npm@10 install`）。**コード修正は不要**（`output:"export"` 構成のため
+    Next 15 のサーバ系 breaking の影響なし・React 19 で型エラー 0）。build 9/9・unit 144 PASS。
+  - **Phase 2**: `vitest` ^2.1.9 → `^4.1.10`（同梱 vite 5.4→**8.1.5**）。vitest.config は
+    include＋environment:"node" のみで設定 breaking なし。unit 144 PASS。
+  - **Phase 3（overrides で推移的依存の脆弱性を固定）**: `frontend/package.json` の `overrides` に
+    以下を追加した。
+    - `postcss ^8.5.10`（next 15 同梱 8.4.31＝GHSA-qx2v-qp2m-jg93 → 8.5.21 に dedupe）
+    - `uuid ^11.1.1`（speech-sdk 経由 9.0.1＝GHSA-w5hq-g745-h8pq。speech-sdk は `uuid.v4()` のみ
+      使用し v11 でも named export・CJS を維持＝無破壊）
+    - `ws ^8.21.1`（speech-sdk 経由 8.21.0＝SNYK-JS-WS-17988732。npm audit 未検出・snyk test 検出）
+    - **override の解除条件（重要）**: これらは脆弱性対応の**一時固定**である。親の
+      `microsoft-cognitiveservices-speech-sdk`（uuid/ws の供給元）や `next`（postcss の供給元）が
+      **同等以上のバージョンを自ら宣言したら、この override を削除し依存更新で追随する**
+      （override は上流が追いつくまでの橋渡しであり、恒久固定しない）。`npm ls uuid ws postcss` で
+      供給元の宣言が override 下限以上になったことを確認できたら外す。
+    - 結果 `npm audit` は **0 vulnerabilities**。
+  - **Phase 4（.snyk 整理）**: 従来期限付き受容していた next high 7件・ws 1件を撤去。ただし
+    `snyk test`（org nonooktk・認証済み）で next@15.5.20 に**新規 high `SNYK-JS-NEXT-15105315`**
+    （fix は next@16.1.5＝メジャー）が判明したため、統括判断 (B) で**当該 1 件のみ期限付き受容**
+    （expires 2027-01-21・reason=静的 export 構成で悪用前提 PPR/minimal mode 非該当）。next 16 更新の
+    別タスクで解消予定。`snyk test --severity-threshold=high --policy-path=.snyk` が exit 0。
+  - **CI**: `.github/workflows/security.yml` の setup-node を `node-version: "20.19"`（vite 8 の
+    Node 要件 ^20.19.0 満たす）へ明示。ジョブ名（Required checks 一致）は不変。
+  - **未実施**: push・PR・Dependabot 操作・デプロイはしていない（ワーキングツリー/ローカルコミットのみ）。
+    backend/worker は無変更。
+
 ## 現在の状態（2026-07-20）
 
 - **セキュリティ残課題 F-3（High）・F-7（Low）・F-4（Low）＋ next パッチ更新（Medium・SCA）の対応＋本番デプロイ完了
