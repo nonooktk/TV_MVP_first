@@ -54,7 +54,7 @@ jobs:
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
-          args: --file=frontend/package.json --severity-threshold=high
+          args: --file=frontend/package.json --severity-threshold=high --policy-path=.snyk
 
   # ── pip（backend）依存のスキャン ──────────────────────────────
   # ジョブ名 "Snyk (pip:backend)" はブランチ保護の Required checks と一致させる。
