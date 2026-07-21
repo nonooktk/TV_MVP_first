@@ -71,6 +71,8 @@ async function getMsal(): Promise<IPublicClientApplication> {
     });
     await instance.initialize();
     // リダイレクト後の応答を処理し、アクティブアカウントを確定する。
+    // ここで失敗（AADSTS エラー等）した場合は例外がそのまま呼び出し側へ伝わる。
+    // FamilyAuthGate がその例外を保持・表示し、原因コードを可視化する。
     const result = await instance.handleRedirectPromise();
     if (result?.account) {
       instance.setActiveAccount(result.account);
@@ -81,6 +83,12 @@ async function getMsal(): Promise<IPublicClientApplication> {
     msalInstance = instance;
     return instance;
   })();
+
+  // 初期化に失敗したら initPromise を破棄し、次回の getMsal で再初期化できるようにする
+  // （失敗した Promise を握り続けると、interaction_in_progress クリア後の再試行も同じ例外で失敗するため）。
+  initPromise.catch(() => {
+    initPromise = null;
+  });
 
   return initPromise;
 }
@@ -155,4 +163,71 @@ export async function isSignedIn(): Promise<boolean> {
   if (!isEntraEnabled()) return false;
   const account = await getAccount();
   return account !== null;
+}
+
+// --- 認証エラーの可視化・復旧ヘルパー（サインイン不具合の原因特定用） ---
+//
+// これまで初期化・サインイン開始の失敗は catch で握りつぶしており、原因コード
+// （AADSTS xxxx 等）が外から見えなかった。以下のヘルパーで、
+//   1. エラー全文を人が読める文字列へ整形（画面表示・console.error 用）、
+//   2. interaction_in_progress（MSAL 一時状態の残留）の検出、
+//   3. 残留した MSAL 一時状態のクリア（ボタン無反応の二次障害からの自動復旧）
+// を提供する。純粋関数（DOM 依存は clearMsalInteractionState のみ・window ガード付き）。
+
+/**
+ * 認証エラーを画面表示・ログ用の1行文字列へ整形する。
+ * MSAL のエラーは name / errorCode / errorMessage を持ち、errorMessage に AADSTS コードが入る。
+ * 標準 Error は name / message。いずれも取りこぼさず、AADSTS コードを含む全文を残す。
+ */
+export function formatAuthError(e: unknown): string {
+  if (e == null) return "不明なエラー";
+  if (typeof e === "string") return e;
+  const err = e as {
+    name?: string;
+    errorCode?: string;
+    errorMessage?: string;
+    message?: string;
+  };
+  const parts: string[] = [];
+  if (err.name) parts.push(err.name);
+  if (err.errorCode) parts.push(`code=${err.errorCode}`);
+  // MSAL は詳細（AADSTS コード等）を errorMessage に入れる。標準 Error は message。
+  const detail = err.errorMessage ?? err.message;
+  if (detail) parts.push(detail);
+  return parts.length > 0 ? parts.join(" / ") : String(e);
+}
+
+/**
+ * MSAL の interaction_in_progress（別のサインイン処理が進行中扱いになったまま残留）か判定する。
+ * これが出るとボタンを押しても loginRedirect が例外で弾かれ、無反応になる。
+ */
+export function isInteractionInProgressError(e: unknown): boolean {
+  return (e as { errorCode?: string })?.errorCode === "interaction_in_progress";
+}
+
+/**
+ * 残留した MSAL の一時状態（interaction status 関連）をクリアする。
+ * MSAL は進行中フラグを sessionStorage に置く（cacheLocation とは別）。
+ * 失敗後にこれが残ると以降のサインインが interaction_in_progress で弾かれ続けるため、
+ * `msal.` で始まり interaction を含むキーだけを sessionStorage / localStorage から消す。
+ */
+export function clearMsalInteractionState(): void {
+  if (typeof window === "undefined") return;
+  try {
+    const storages = [window.sessionStorage, window.localStorage];
+    for (const storage of storages) {
+      if (!storage) continue;
+      // 走査中に removeItem すると index がずれるため、対象キーを先に集めてから消す。
+      const targets: string[] = [];
+      for (let i = 0; i < storage.length; i++) {
+        const key = storage.key(i);
+        if (key && key.startsWith("msal.") && key.includes("interaction")) {
+          targets.push(key);
+        }
+      }
+      for (const key of targets) storage.removeItem(key);
+    }
+  } catch {
+    // ストレージ参照不可（プライベートモード等）なら何もしない。
+  }
 }
