@@ -73,6 +73,18 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def add_security_headers(request, call_next):
+    """全レスポンスに X-Content-Type-Options: nosniff を付与する。
+
+    F-7（SECURITY_REPORT_2026-07-19）対応: DAST(baseline) が /healthz・/openapi.json 等の
+    API レスポンスに nosniff 欠落を検出したため、MIME スニッフィング抑止を横断的に付与する。
+    """
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
 @app.get("/healthz", tags=["health"])
 def healthz() -> dict:
     """ヘルスチェック。"""
