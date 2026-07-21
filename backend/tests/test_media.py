@@ -121,6 +121,53 @@ def test_upload_sas(client, seeded, db, family_headers):
         assert "sig=upload" in item["upload_url"]
 
 
+def test_upload_sas_is_single_blob_scoped():
+    """F-1: 発行されるアップロードSASが単一Blobスコープ（sr=b）であることを確認する。
+
+    従来のコンテナSAS（sr=c）は他家族プレフィックスへ越境PUTできる穴があった。
+    実 BlobService（Azurite 接続文字列・ネットワーク不要の純粋なSAS生成）で検証する。
+    """
+    from urllib.parse import parse_qs
+    import os
+
+    from app.services.blob import BlobService
+
+    svc = BlobService(
+        connection_string=os.environ["AZURE_STORAGE_CONNECTION_STRING"],
+        container="media",
+    )
+    prefix = "families/fam-a/calls/call-1/"
+    storage_key = f"{prefix}candidates/x.jpg"
+    url = svc.upload_sas_url(storage_key, call_prefix=prefix)
+
+    qs = parse_qs(url.split("?", 1)[1])
+    # sr=b は「署名対象リソース=単一Blob」。コンテナSASなら sr=c になる。
+    assert qs["sr"] == ["b"], f"SASが単一Blobスコープでない: sr={qs.get('sr')}"
+    # 権限は create+write のみ（read を含まない）。sp の順序は SDK 実装依存のため集合で比較。
+    assert set(qs["sp"][0]) == set("cw"), f"想定外の権限: sp={qs.get('sp')}"
+    # 発行先URLは当該 storage_key の実Blobを指す。
+    assert url.split("?", 1)[0].endswith(storage_key)
+
+
+def test_upload_sas_rejects_key_outside_prefix():
+    """F-1: 通話プレフィックス外の storage_key には SAS を発行しない（防御）。"""
+    import os
+
+    import pytest
+
+    from app.services.blob import BlobService
+
+    svc = BlobService(
+        connection_string=os.environ["AZURE_STORAGE_CONNECTION_STRING"],
+        container="media",
+    )
+    with pytest.raises(ValueError):
+        svc.upload_sas_url(
+            "families/fam-b/calls/call-9/evil.jpg",
+            call_prefix="families/fam-a/calls/call-1/",
+        )
+
+
 def _seed_candidates(db, call, n=6, presented=True) -> Album:
     """写真候補 n 枚＋album（awaiting_selection）を作る。"""
     for i in range(n):

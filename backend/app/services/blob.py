@@ -2,7 +2,7 @@
 
 パス規約・SASポリシーは docs/data-contract.md §2 が正。
 - 閲覧用 SAS: read 権限・15分・対象Blob単位。
-- アップロード用 SAS: create+write 権限・1時間・当該通話のプレフィックス限定。
+- アップロード用 SAS: create+write 権限・1時間・対象Blob単位（当該 storage_key の1個のみ）。
 
 `memories.storage_key` / `albums.video_storage_key` にはコンテナ名 `media` を除く
 フルパス（families/… から始まる）を格納する。SAS URL はコンテナ名を含む実URLを返す。
@@ -18,9 +18,7 @@ from datetime import datetime, timedelta, timezone
 from azure.storage.blob import (
     BlobSasPermissions,
     BlobServiceClient,
-    ContainerSasPermissions,
     generate_blob_sas,
-    generate_container_sas,
 )
 
 # SAS 有効期限（data-contract.md §2）
@@ -83,20 +81,28 @@ class BlobService:
         return f"{self._blob_url(storage_key)}?{sas}"
 
     def upload_sas_url(self, storage_key: str, call_prefix: str) -> str:
-        """アップロード用 SAS 付き URL を返す（create+write・1時間）。
+        """アップロード用 SAS 付き URL を返す（create+write・1時間・単一Blobスコープ）。
 
-        スコープは当該通話のプレフィックス `call_prefix`
-        （families/{family_id}/calls/{call_id}/）に限定する。
-        コンテナSASを call_prefix に絞って発行し、対象Blobの実URLへ付与する。
+        F-1（SECURITY_REPORT_2026-07-19）対応: 従来はコンテナ全体スコープの
+        generate_container_sas を発行していたため、SAS トークン自体はコンテナ内の
+        全 Blob に有効で、他家族プレフィックスへ越境 PUT できる穴があった。
+        本実装では view_sas_url と同じく generate_blob_sas で「その storage_key 1個
+        だけ」に効く SAS を発行する（コンテナ内の他 Blob へは原理的に書けない）。
+
+        引数 call_prefix は当該通話プレフィックス
+        （families/{family_id}/calls/{call_id}/）。storage_key がこのプレフィックス
+        配下であることを防御的に検証する（呼び出し側の組み立てミス検出のため）。
         """
+        if not storage_key.startswith(call_prefix):
+            # 呼び出し側が通話プレフィックス外のキーを渡した場合は SAS を発行しない。
+            raise ValueError("storage_key must be within call_prefix")
         expiry = datetime.now(timezone.utc) + _UPLOAD_TTL
-        # コンテナSASにプレフィックスは組み込めないため、権限を create+write に絞り、
-        # 発行先URLを当該通話プレフィックス配下の Blob に限定することで運用スコープを担保する。
-        sas = generate_container_sas(
+        sas = generate_blob_sas(
             account_name=self._client.account_name,
             container_name=self.container,
+            blob_name=storage_key,
             account_key=self._account_key(),
-            permission=ContainerSasPermissions(create=True, write=True),
+            permission=BlobSasPermissions(create=True, write=True),
             expiry=expiry,
         )
         return f"{self._blob_url(storage_key)}?{sas}"

@@ -151,7 +151,11 @@ def require_family(
     token = authorization.split(" ", 1)[1].strip()
 
     # 1) 開発用固定トークン（各プロバイダ有効時も併存する裏口）。
-    if token == settings.DEV_FAMILY_TOKEN:
+    #    F-3（SECURITY_REPORT_2026-07-19）対応: DEV_FAMILY_TOKEN が**非空のときだけ**照合する。
+    #    本番では env から DEV_FAMILY_TOKEN を除去する運用のため、空のときに `token == ""`
+    #    （＝空文字 Bearer など）が裏口とマッチする穴を塞ぐ。空なら dev トークン経路は無効化され、
+    #    Google/Entra のみで認証する。
+    if settings.DEV_FAMILY_TOKEN and token == settings.DEV_FAMILY_TOKEN:
         return _resolve_dev_family_owner(db)
 
     # 2) iss（未検証）を見てプロバイダへ振り分ける。iss の厳密判定は各検証器が行う。

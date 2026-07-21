@@ -81,6 +81,165 @@ BGM 付きハイライト動画を生成、家族の閲覧 UI と高齢者側の
 - 開発期間は実働2週間。遅延時の削減優先順位は RFP 10章（①映像look-back → ②STTトリガー →
   ③visionキャプション → ④BGM → ⑤着信ポーリング → ⑥高齢者側再生 → ⑦動画生成 の順で削る）
 
+## 現在の状態（2026-07-20）
+
+- **セキュリティ残課題 F-3（High）・F-7（Low）・F-4（Low）＋ next パッチ更新（Medium・SCA）の対応＋本番デプロイ完了
+  （backend=tvmvp-api:v12・frontend=SWA 再デプロイ）**: 統括承認済みの「安全な範囲の修正」。
+  F-8/F-9 は据え置き。
+  - **F-3（dev 固定トークンの本番失効）**:
+    - コードガード: `backend/app/api/deps.py::require_family` の dev トークン照合を
+      `if settings.DEV_FAMILY_TOKEN and token == settings.DEV_FAMILY_TOKEN:` に変更
+      （env を空にした時に**空文字トークンが裏口とマッチする穴**を塞ぐ）。
+    - Settings のデフォルト化: `backend/app/core/config.py` の `DEV_FAMILY_TOKEN: str` を
+      **`= ""`（デフォルト空）** に変更。**これが無いと env 除去時に pydantic-settings の必須
+      検証が失敗しコンテナが起動しない**ため、env 除去の前提として必須の修正（F-3 と整合）。
+    - 本番失効: cloud `ca-tvmvp-api` から **`DEV_FAMILY_TOKEN` env を除去**
+      （`az containerapp update ... --remove-env-vars DEV_FAMILY_TOKEN`）。ガードと合わせ本番は
+      Google/Entra のみで認証。
+    - テスト: `backend/tests/test_idor_manual.py` に `test_dev_token_disabled_when_env_empty`
+      （`get_settings` を DEV_FAMILY_TOKEN/GOOGLE/ENTRA すべて空へ上書きし、旧 dev トークン・
+      空 Bearer・不正 Bearer・ヘッダ無しがすべて **401** をパラメタライズで検証）を追加。既存の
+      `test_dev_token_backdoor_is_open_locally`（ローカルは 200）は維持。
+  - **F-7（API に nosniff）**: `backend/app/main.py` に全レスポンスへ
+    `X-Content-Type-Options: nosniff` を付与する HTTP ミドルウェアを追加。テストは新規
+    `backend/tests/test_security_headers.py`（`/healthz`・`/openapi.json`・認証エンドポイントに
+    nosniff が付くこと）。
+  - **F-4（依存バージョン固定）**: `backend/requirements.txt` の直接依存を `requirements.lock.txt`
+    の実バージョンで `==` ピン留め（extras の推移的依存の厳密版は lock を参照とコメント明記）。
+    Docker ビルド（ACR）で解決を検証。
+  - **next パッチ更新（SCA）**: `frontend` の next を **14.2.0 → 14.2.35**（`package.json`／
+    `package-lock.json` 更新）。14.2.35 は 14.2.x 最新パッチでレポートの 14.2.0 Critical/High を
+    解消（残 advisory は Image Optimizer/RSC/Middleware 等＝`output:"export"` の本アプリで未使用）。
+  - **検証**: backend `.venv-scan` pytest **204 passed**（197→+7: F-3 4・F-7 3）／frontend
+    `npx vitest run` **144 passed**／クリーンコピー（`.env.local` 非同梱・`.env.production` のみ）で
+    `npx next build` **9/9**・バンドル検証（cloud API 焼込み／localhost・dev-fixed-token 漏れなし／
+    Google・Entra クライアントID あり）。
+  - **デプロイ**: backend は F-3+F-7+F-4 を **`tvmvp-api:v12`**（v11 は config デフォルト化前の
+    中間ビルドで置換。既存タグ非上書き）→ `az containerapp update` → **rev `ca-tvmvp-api--0000016`
+    （v12・100% traffic）** → `DEV_FAMILY_TOKEN` env 除去。確認: env に DEV_FAMILY_TOKEN **無し**・
+    `/healthz` **200**（空デフォルトで正常起動）・`/healthz`/`/openapi.json` に **nosniff**・未認証/
+    空 Bearer/旧 `dev-fixed-token` すべて **401**（裏口失効）。frontend は next 14.2.35 ビルドを
+    SWA production へ再デプロイ（デプロイトークンはシェル変数直渡し）→ `curl -I` で F-6 ヘッダ
+    （X-Frame-Options/CSP/Permissions-Policy 等）が引き続き配信・配信チャンク更新を確認。本番実機で
+    サインイン画面（Google 公式ボタン＋MSAL）が CSP 下で正常描画（回帰なし）。
+  - 秘匿値は一切出力・コミットしていない。git commit/push は未実施（ワーキングツリー変更のみ）。
+
+- **セキュリティ指摘 F-10（Medium・本番前必須／QAレビューで F-1 と一対で検出）の修正＋本番デプロイ完了
+  （backend のみ・Container App）**: `backend/app/api/media.py::register_media` が
+  `item.storage_key` を無検証で Memory に保存していたため、家族Bが自分の call に
+  `storage_key=families/{家族A}/…` の memory を register → `GET /calls/{id}/candidates` が
+  同 storage_key の read SAS を発行 → **他家族 Blob の read SAS を取得できる芽**（F-1 の read 版）
+  が残っていた。
+  - **修正**: `_owned_call` 直後（冪等チェックの前）で、全 `item.storage_key` が当該通話の
+    `call_prefix(call.family_id, call.id)`（＝`families/{family_id}/calls/{call_id}/`。upload-sas と
+    同じヘルパ）配下であることをサーバ側検証。**空・`..` を含む（遡上）・プレフィックス外**は
+    `400`（`code=invalid_storage_key`）で拒否。越境 read の芽を根絶。
+  - **テスト**: `backend/tests/test_idor_manual.py` に3件追加＝`test_register_rejects_foreign_prefix_storage_key`
+    （他家族プレフィックスの storage_key を含む register が **400**）／`test_register_rejects_traversal_storage_key`
+    （`..` 含みが 400）／`test_register_accepts_own_prefix_storage_key`（自家族プレフィックスは従来どおり **201**）。
+    既存 `test_call_end.py::test_end_does_not_break_media_register_transition` はダミー
+    `families/x/…`（プレフィックス外＝新検証で 400）を使っていたため、テストの主眼（end×register
+    の ended 遷移共存）を保ったまま storage_key を実プレフィックスへ追随修正（F-1 の `test_upload_sas`
+    更新と同種）。
+  - **検証**: `backend/.venv-scan` で `python -m pytest tests/ -q` → **197 passed**（194→+3）。
+  - **デプロイ**: `az acr build --registry acrtvmvp73bb --image tvmvp-api:v10`（latest 非上書き）→
+    `az containerapp update -g rg-001-gen12 -n ca-tvmvp-api --image .../tvmvp-api:v10` →
+    **新リビジョン `ca-tvmvp-api--0000013`（v10・100% traffic）**。`/healthz` **200**・未認証
+    `/media/register`・`/albums` とも **401**（認可健全）を確認。旧 rev 0000012（v9）は退役。
+    秘匿値は一切出力・コミットしていない。
+
+- **セキュリティ指摘 F-1（Blocker）・F-6（Medium）の修正＋本番デプロイ完了
+  （backend＋frontend／SWA・Container App 両方デプロイ済み）**: レポート
+  `docs/SECURITY_REPORT_2026-07-19.md` の残課題のうち、本番前必須の2件を修正・出荷した。
+  - **F-1（アップロードSASの過剰スコープ）**: `backend/app/services/blob.py::upload_sas_url`
+    を `generate_container_sas`（コンテナ全体 create+write）から **`generate_blob_sas`
+    （当該 storage_key 1個だけの create+write・有効期限は現行 `_UPLOAD_TTL`=1時間を維持）**
+    へ変更。これでSASトークン自体が単一Blobにしか効かず、他家族プレフィックスへの越境PUTが
+    原理的に不可能になった（read側 `view_sas_url` と同じ手法）。あわせて `storage_key` が
+    引数 `call_prefix` 配下でない場合は `ValueError` を送出する防御的検証を追加。docstring も
+    実態へ更新。未使用になった `generate_container_sas` / `ContainerSasPermissions` の import を削除。
+    - **テスト**: `backend/tests/test_media.py` に2件追加＝`test_upload_sas_is_single_blob_scoped`
+      （実 BlobService でSASを発行し `sr=b`〈単一Blob〉・権限 `sp`=create+write のみ・発行先URLが
+      当該 storage_key を指すことを検証。ネットワーク不要の純粋なSAS生成）／
+      `test_upload_sas_rejects_key_outside_prefix`（プレフィックス外キーで `ValueError`）。既存
+      `test_upload_sas`（Fake ベース）と `test_idor_manual.py`（越境防御31/11件）は無変更で維持。
+    - **検証**: `backend/.venv-scan` で `python -m pytest tests/ -q` → **194 passed**
+      （旧: worker テスト用に `.venv-scan` へ `Pillow` を追加導入した）。
+    - **デプロイ**: `az acr build --registry acrtvmvp73bb --image tvmvp-api:v9`（latest 非上書き）→
+      `az containerapp update -g rg-001-gen12 -n ca-tvmvp-api --image .../tvmvp-api:v9` →
+      **新リビジョン `ca-tvmvp-api--0000012`（v9・100% traffic・RunningAtMaxScale）**。
+      `/healthz` **200**・未認証 `/albums`・`/media/upload-sas` とも **401**（認可健全）を確認。
+      旧 rev 0000011（v8）は deprovisioning。
+  - **F-6（セキュリティヘッダ未設定）**: `frontend/public/staticwebapp.config.json` を**新設**
+    （静的エクスポートで `out/` 直下へ配置され SWA が読む）。`globalHeaders` に
+    `X-Frame-Options: DENY`／`X-Content-Type-Options: nosniff`／`Strict-Transport-Security:
+    max-age=31536000; includeSubDomains`／`Referrer-Policy: strict-origin-when-cross-origin`／
+    `Permissions-Policy`（camera/microphone=self・他は絞る）／`Content-Security-Policy` を設定。
+    - **CSP 設計方針（アプリ非破壊が絶対条件）**: script/object/base/frame は締める一方、
+      **`connect-src` は `'self' https: wss: blob: data:` と広く許容**した。理由は Agora Web SDK が
+      メディアゲートウェイへ**動的な生IP/wss**で接続するため、connect-src を厳格化すると通話が壊れる
+      から。XSS 実行の主防御は `script-src`（`'self' 'unsafe-inline' 'wasm-unsafe-eval' blob:
+      accounts.google.com *.gstatic.com cdn.jsdelivr.net`＝Next静的エクスポートの都合で
+      unsafe-inline、MediaPipe WASM 用に wasm-unsafe-eval）と `object-src 'none'`・
+      `base-uri 'self'`・`frame-ancestors 'none'` で担保。`frame-src` は Google/MSAL
+      （accounts.google.com・login.microsoftonline.com・*.msftauth.net）、`img-src` に
+      `*.blob.core.windows.net`（アルバムSAS画像）等を許可。
+    - **CSP 検証**: SWA CLI エミュレータ（`swa start ./out`）で実ヘッダを適用して配信し、ブラウザで
+      サインイン画面を表示 → **Google 公式サインインボタン（GIS 由来・accounts.google.com の
+      iframe）と Microsoft ボタンが CSP 下で正しく描画**・インラインスタイル適用・React
+      ハイドレーション（`/call`→サインインゲートへのリダイレクト）成立を確認。**デプロイ後の
+      本番実機**（`gray-dune-0117e4d00`）でも同様に Google 公式ボタン＋MSAL ボタンの描画を確認。
+      通話中の Agora メディア接続・MediaPipe ランタイムロードは2者通話が必要なため実機未検証だが、
+      Agora は connect-src の広い許可でカバー、MediaPipe はロード失敗時 `face_score=0` で通話継続
+      （facePipeline 設計）＝CSP に起因して通話自体が壊れる経路はない。
+    - **frontend ビルド/デプロイ**: 本セッションのツール権限で `.env.local` を退避（mv）できない
+      ため、`.env.local` を含めない**クリーンコピーを scratchpad に作成**（`.env.production` のみ・
+      公開値のみのリポジトリ追跡ファイル）→ `next build`（9/9）で本番バンドル生成。バンドル検証で
+      **cloud API URL 焼込みあり・localhost:8000 漏れなし・dev-fixed-token 漏れなし**・Google/Entra
+      クライアントID あり（本番現行値と一致）を確認。`out/staticwebapp.config.json` 生成を確認 →
+      `npx @azure/static-web-apps-cli deploy ./out`（デプロイトークンは
+      `az staticwebapp secrets list -g rg-001-gen12 -n swa-tvmvp-73bb` からシェル変数で直渡し・
+      ファイル/ログに非出力）で **production へ配信**。配信後 `curl -I` で `/`・`/call/` とも
+      新ヘッダ（X-Frame-Options・CSP・Permissions-Policy 等）が付くことを確認。
+  - **未対応（残課題）**: レポートの F-3（dev トークン本番失効）・next 14.2.35 パッチ更新・
+    F-9（DB ネットワーク強化）・認証済み DAST 等は今回対象外（別途）。**秘匿値（.env / cloud.env）は
+    一切出力・コミットしていない**。git commit/push は未実施（ワーキングツリー変更のみ）。
+
+## 現在の状態（2026-07-19）
+
+- **家族側 Microsoft サインイン不具合のデバッグ支援＝認証エラーの可視化と二次障害の自動復旧
+  （frontend のみ・SWA 本番デプロイ済み）**: 本番 SWA
+  （https://gray-dune-0117e4d00.7.azurestaticapps.net）で「Microsoft でサインイン」→
+  認証完了 → アプリに戻るとサインイン画面のまま（`/token` 交換前に `handleRedirectPromise`
+  が失敗／取りこぼし）となる不具合の**原因コード（AADSTS 等）を可視化する**のが目的。
+  従来コードはエラーを catch で完全に握りつぶしており原因が外から見えなかった。
+  - **変更ファイル**: `frontend/src/lib/auth.ts`／`frontend/src/components/FamilyAuthGate.tsx`。
+  - **auth.ts**: 純粋ヘルパーを追加。`formatAuthError`（name / errorCode / errorMessage を
+    取りこぼさず AADSTS コードを含む1行へ整形）・`isInteractionInProgressError`（MSAL の
+    `interaction_in_progress` 検出）・`clearMsalInteractionState`（`msal.` で始まり
+    interaction を含むキーだけを sessionStorage / localStorage から削除）。あわせて `getMsal`
+    の初期化 Promise を**失敗時に破棄**し（`initPromise.catch(()=>initPromise=null)`）、
+    一時状態クリア後の再試行が同じ失敗 Promise を掴み続けないようにした。
+  - **FamilyAuthGate.tsx**: 初期化（`handleRedirectPromise`）とサインインボタン
+    （`handleMicrosoftSignIn`→`login`）の catch で、握りつぶしをやめて①`console.error` に
+    全文出力②サインイン画面に赤字の小さめテキスト（`data-testid="auth-error"`）でエラー全文表示。
+    `interaction_in_progress` 検出時は一時状態をクリアし、サインインボタンでは**1回だけ自動
+    リトライ**（再失敗時は「（もう一度お試しください）」付きで表示）。高齢者側（/elder/*）へ
+    MSAL を読み込ませない現行構成・静的エクスポート互換（トップレベル副作用なし・遅延 import・
+    window ガード）は不変。
+  - **検証**: vitest **144件**（136→+8: `tests-unit/authError.test.ts`＝formatAuthError 4・
+    isInteractionInProgressError 2・clearMsalInteractionState 2。DOM は node 環境向けに最小
+    Storage を window へ差し込んで検証）／**tsc 0エラー**／**next build 9/9**。
+  - **デプロイ**: docs/dev-setup §13-3 の標準手順（`.env.local` を `mv` で退避 →
+    `.env.production` 自動読込で `npx next build` → デプロイトークンをシェル変数経由で SWA CLI
+    へ直渡し → `.env.local` 復元）で SWA production に配信済み。配信中の共有チャンク
+    `_next/static/chunks/119-856516ff04a81ffe.js`（HTTP 200）に `auth-error`／
+    「サインインでエラーが発生しました」／「もう一度お試しください」が含まれることを
+    curl+grep で確認済み。backend/worker は無変更。git commit/push は未実施（ワーキングツリー変更のみ）。
+  - **次アクション（統括）**: シークレットウィンドウで本番 SWA を開き Microsoft で再サインイン →
+    戻った画面に赤字で表示されるエラー全文（AADSTS コード）を共有いただければ、行き先の原因
+    （リダイレクトURI不一致・同意・nonce/state 等）を特定できる。
+
 ## 現在の状態（2026-07-18）
 
 - **検知トリガーの再構成（Phase A・Round 1 実測に基づく設計見直し／frontend のみ・
