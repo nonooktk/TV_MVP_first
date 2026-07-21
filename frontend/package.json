@@ -16,14 +16,15 @@
     "agora-rtc-sdk-ng": "^4.24.5",
     "idb": "^8.0.0",
     "microsoft-cognitiveservices-speech-sdk": "^1.50.0",
-    "next": "14.2.35",
-    "react": "18.3.0",
-    "react-dom": "18.3.0"
+    "next": "^15.5.20",
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
     "@types/node": "26.1.0",
     "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
     "fake-indexeddb": "^6.0.0",
     "typescript": "6.0.3",
     "vitest": "^2.1.9"
