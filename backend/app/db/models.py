@@ -146,6 +146,9 @@ class Device(Base):
     status: Mapped[str] = mapped_column(
         device_status_enum, nullable=False, server_default=text("'pending'")
     )
+    # 家族（owner）が付ける表示名。通話画面の Zoom 風ラベルに使う（例: 「おばあちゃん」）。
+    # 未設定は null（フロントはラベルを表示しない）。
+    display_name: Mapped[str | None] = mapped_column(String, nullable=True)
     # 初回登録リンクのトークンハッシュ（登録完了後はnullでよい）
     registration_token_hash: Mapped[str | None] = mapped_column(String, nullable=True)
     # 登録リンクの有効期限
