@@ -83,8 +83,8 @@ BGM 付きハイライト動画を生成、家族の閲覧 UI と高齢者側の
 
 ## 現在の状態（2026-07-23）
 
-- **タスクB: 通話参加者の名前表示（Zoom風ラベル）実装完了（backend＋frontend・ローカル検証まで／
-  デプロイ未実施・レビュー待ち・openapi v0.6.0）**: 統括承認済み。家族（owner）が高齢者側デバイスに
+- **タスクB: 通話参加者の名前表示（Zoom風ラベル）実装・レビュー・本番デプロイ完了
+  （backend＋frontend・openapi v0.6.0・2026-07-23 統括承認）**: 家族（owner）が高齢者側デバイスに
   表示名を付け、通話画面の映像左下に Zoom 風の名前ラベルを表示する。
   - **DB**: `devices.display_name`（String・nullable）を追加。md → models.py →
     マイグレーション `0003_device_display_name`（0002 と同型・nullable 列1本追加）の順で同期。
@@ -114,9 +114,16 @@ BGM 付きハイライト動画を生成、家族の閲覧 UI と高齢者側の
   - **テスト**: backend `pytest` **219 passed**（`test_devices_patch.py` 14件＝正常系/空/30字上限/
     viewer403/他家族404/GET帰属/**GET先頭=発信解決一致**＋`test_calls.py` に remote_display_name 1件）。
     frontend `vitest run` **144 passed**／`npm run build` **9/9・Exporting 2/2**（型チェック通過）。
-  - **未実施**: デプロイ・git commit/push（コーディネーターがレビュー後にまとめる）。
+  - **デプロイ（2026-07-23・統括承認済み）**: クラウドDBへ alembic 0003 適用（統括実行・
+    `alembic current`=0003 確認）→ api イメージ **`tvmvp-api:v13`** → `ca-tvmvp-api`
+    rev **0000017**（Healthy・traffic 100%・/healthz 200・openapi.json に GET/PATCH /devices と
+    `remote_display_name` 配信・未認証 GET /devices は 401）→ frontend はクリーンコピー
+    （.env.local 非同梱）で `next build` → バンドル検証（クラウドAPI URL 焼込み・localhost:8000／
+    dev-fixed-token 非混入）→ SWA production へ配信。git commit 済み
+    （ブランチ `feature/album-video-and-call-names`）・push は統括確認待ち。
+    実 Agora 2者通話での実機ラベル目視は未実施（次回通話デモで確認）。
 
-- **アルバム動画が再生できない不具合の修正（frontend のみ・ローカル build 検証まで／デプロイ未実施・レビュー待ち）**:
+- **アルバム動画が再生できない不具合の修正（frontend のみ・2026-07-23 本番デプロイ済み）**:
   ハイライト動画（Azure Blob の SAS URL）が家族側アルバムの `<video>` で再生されない不具合を修正。
   原因は `frontend/public/staticwebapp.config.json` の CSP で、`img-src` には
   `https://*.blob.core.windows.net` があるのに `media-src` は `'self' blob: data:` のみだったため、
@@ -125,8 +132,10 @@ BGM 付きハイライト動画を生成、家族の閲覧 UI と高齢者側の
     https://*.blob.core.windows.net`）。他の CSP ディレクティブ・他の globalHeaders は無変更。
   - **検証**: JSON valid（`python3 -m json.tool`）／`npm run build` 9/9・Exporting 2/2 成功／
     `out/staticwebapp.config.json` に変更反映を確認。
-  - **未実施**: デプロイ（統括承認後）・実環境での動画再生の最終確認。git commit/push は未実施
-    （コーディネーターがレビュー後にまとめる）。
+  - **デプロイ（2026-07-23・統括承認済み）**: SWA production へ配信し、`curl -I` で本番の
+    CSP ヘッダに `media-src 'self' blob: data: https://*.blob.core.windows.net` が
+    含まれることを確認（トップ／album／call とも 200）。実データでの動画再生の目視は
+    統括の実機確認に委ねる。git commit 済み・push は統括確認待ち。
 
 ## 現在の状態（2026-07-21）
 
