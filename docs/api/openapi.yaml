@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: TV電話MVP API
-  version: 0.5.0
+  version: 0.6.0
   description: >
     支給物A4。TV電話サービス「元気にしてる？」のAPI仕様。
 
@@ -27,6 +27,13 @@ info:
     ③ DELETE /albums/{album_id} を新設（owner のみ・完全削除・204）。
     thumb_sas_url / collage_sas_url / photos の SAS はパス規約から導出して発行し、
     Blob の存在チェックはしない（フロントは thumb 未生成時 sas_url にフォールバックする）。
+
+    v0.6.0（通話参加者の名前表示・Zoom風ラベル）の契約変更:
+    ① CallTokenResponse に remote_display_name（相手＝高齢者側デバイスの表示名・nullable）を追加。
+    ② GET /devices（家族 Bearer）を新設。自家族のデバイス一覧（1件想定）を返す
+       （設定モーダルでの現在名表示用）。
+    ③ PATCH /devices/{device_id}（家族 Bearer・owner のみ）を新設。デバイスの表示名を更新する
+       （30文字まで。空文字・空白のみは未設定＝null 扱い。他家族の device は 404）。
 
 tags:
   - name: tokens
@@ -473,6 +480,68 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
 
+  /devices:
+    get:
+      tags: [devices]
+      summary: 自家族のデバイス一覧取得
+      description: >
+        自家族に帰属するデバイス一覧（1件想定）を返す（v0.6.0）。
+        設定モーダルで現在の表示名・登録状態を出すために使う。family_id で絞り込むため
+        他家族のデバイスは返さない。
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 取得成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /devices/{device_id}:
+    patch:
+      tags: [devices]
+      summary: デバイス表示名の更新（owner のみ）
+      description: >
+        デバイスの表示名（通話画面の Zoom 風ラベル用）を更新する（v0.6.0）。
+        owner ロールのみ実行可能（viewer は 403）。対象デバイスが自家族に属することを検証し、
+        他家族のデバイスは存在を秘匿して 404 を返す（IDOR 対策）。
+        display_name は 30 文字まで。空文字・空白のみは未設定（null）扱いにする。
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: device_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeviceUpdateRequest'
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: デバイスが見つからない（他家族のデバイスを含む）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /devices/register:
     post:
       tags: [devices]
@@ -817,7 +886,7 @@ components:
           format: uuid
     CallTokenResponse:
       type: object
-      required: [token, channel_name, uid, expires_at, app_id]
+      required: [token, channel_name, uid, expires_at, app_id, remote_display_name]
       properties:
         token:
           type: string
@@ -835,6 +904,12 @@ components:
           description: >
             Agora App ID（公開値）。フロントの SDK join に必要（M1・契約変更①。
             フロント側に環境変数を重複配置しないためサーバから返す）
+        remote_display_name:
+          type: string
+          nullable: true
+          description: >
+            相手（高齢者側デバイス）の表示名（家族が設定・v0.6.0）。通話画面の
+            Zoom 風ラベルに使う。未設定なら null（フロントはラベルを表示しない）。
     SpeechTokenResponse:
       type: object
       required: [token, region, expires_at]
@@ -1056,3 +1131,42 @@ components:
         device_token:
           type: string
           description: 以降の待受認証（X-Device-Token）に使う恒久トークン
+    DeviceUpdateRequest:
+      type: object
+      description: >
+        デバイス表示名の更新（v0.6.0）。display_name は 30 文字まで。
+        空文字・空白のみは未設定（null）扱いにする。
+      properties:
+        display_name:
+          type: string
+          maxLength: 30
+          nullable: true
+          description: 家族が付ける表示名（通話画面の Zoom 風ラベル用。例「おばあちゃん」）
+    DeviceInfo:
+      type: object
+      required: [device_id, status]
+      properties:
+        device_id:
+          type: string
+          format: uuid
+        display_name:
+          type: string
+          nullable: true
+          description: 家族が設定した表示名（未設定は null）
+        status:
+          type: string
+          enum: [pending, active, revoked]
+          description: デバイスの登録状態
+        registered_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 登録完了時刻（未登録は null）
+    DeviceList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeviceInfo'

@@ -318,6 +318,31 @@ export default function ElderStandbyPage() {
           {/* 相手映像（全画面・WF-01③）。Agora RemoteVideoTrack の描画先 */}
           <div ref={remoteRef} style={{ position: "absolute", inset: 0 }} />
 
+          {/* 相手（家族）の名前ラベル（Zoom風・左下）。着信ポーリングで受信した family_name。 */}
+          {familyName && (
+            <div
+              data-testid="elder-remote-name-label"
+              style={{
+                position: "absolute",
+                left: "3vw",
+                bottom: "3vw",
+                maxWidth: "50%",
+                background: "rgba(0,0,0,0.55)",
+                color: "#fff",
+                padding: "0.5vw 1.4vw",
+                borderRadius: 10,
+                fontSize: "2.2vw",
+                fontWeight: 700,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                zIndex: 22,
+              }}
+            >
+              {familyName}
+            </div>
+          )}
+
           {/* 自分映像（小さく・左下）。publish 中のカメラ確認用 */}
           <div
             ref={localRef}

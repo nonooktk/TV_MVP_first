@@ -81,6 +81,53 @@ BGM 付きハイライト動画を生成、家族の閲覧 UI と高齢者側の
 - 開発期間は実働2週間。遅延時の削減優先順位は RFP 10章（①映像look-back → ②STTトリガー →
   ③visionキャプション → ④BGM → ⑤着信ポーリング → ⑥高齢者側再生 → ⑦動画生成 の順で削る）
 
+## 現在の状態（2026-07-23）
+
+- **タスクB: 通話参加者の名前表示（Zoom風ラベル）実装完了（backend＋frontend・ローカル検証まで／
+  デプロイ未実施・レビュー待ち・openapi v0.6.0）**: 統括承認済み。家族（owner）が高齢者側デバイスに
+  表示名を付け、通話画面の映像左下に Zoom 風の名前ラベルを表示する。
+  - **DB**: `devices.display_name`（String・nullable）を追加。md → models.py →
+    マイグレーション `0003_device_display_name`（0002 と同型・nullable 列1本追加）の順で同期。
+  - **backend API**: ① `CallTokenResponse` に `remote_display_name`（call→device の display_name）を追加。
+    ② `GET /devices`（require_family）新設＝自家族のデバイス一覧（設定モーダルの現在名表示用）。
+    ③ `PATCH /devices/{device_id}`（require_family・**owner のみ**・viewer は 403）新設＝表示名更新
+    （30字上限・空文字/空白は null 化・他家族 device は 404＝IDOR 対策）。認証なしの
+    `/devices/register` とは依存を各ルートに個別付与して同居（register に影響なし）。
+    `docs/api/openapi.yaml` を v0.6.0 に同期（validator 通過）。
+  - **frontend**: `api-client.ts` に型・`getDevices()`・`updateDeviceDisplayName()` を追加。
+    家族ホーム `page.tsx` の「相手の設定」モーダルに名前入力欄＋保存ボタン（現在名を初期表示・
+    保存成否フィードバック・owner 前提 UI＋backend 403 最終ガード）。家族通話画面 `call/page.tsx` は
+    相手映像の左下に相手名ラベル（remote_display_name）、自分小窓に自分名（Entra 表示名が取れる場合のみ）。
+    高齢者通話画面 `elder/standby/page.tsx` は相手映像左下に着信ポーリングの family_name をラベル表示。
+    名前未設定時はラベル非表示（フォールバック文字列を出さない）。
+  - **レビュー指摘の修正（2026-07-23・QA=マージ可／GPTクロス=修正後push可）**: Should 3件を反映。
+    ① **名前設定対象と発信対象のデバイス一致**: 名前設定モーダルは GET /devices の先頭を PATCH する一方、
+    発信 POST /calls は「最新の active」を自動選択しており、複数端末時にズレる可能性があった。
+    共通の並び順ヘルパ `app/api/device_selection.py::device_priority_order()`（active 最優先→
+    registered_at 降順 nulls_last→created_at 昇順）を新設し、発信解決（calls.py）と GET /devices
+    （devices.py）の両方で使用。発信解決は active に絞るため結果不変（回帰なし）、GET /devices は
+    active があれば必ず先頭が発信対象と一致する。フロントは従来どおり items[0] を採用。
+    ② **OpenAPI 契約**: 実装が常に返す（null 含む）ため `CallTokenResponse.required` に
+    `remote_display_name` を追加（nullable のまま。validator 再通過）。
+    ③ **マイグレーション注意書き**: `0003_device_display_name.py` の docstring に「downgrade は
+    入力済み表示名を不可逆に削除する」旨を明記。
+  - **テスト**: backend `pytest` **219 passed**（`test_devices_patch.py` 14件＝正常系/空/30字上限/
+    viewer403/他家族404/GET帰属/**GET先頭=発信解決一致**＋`test_calls.py` に remote_display_name 1件）。
+    frontend `vitest run` **144 passed**／`npm run build` **9/9・Exporting 2/2**（型チェック通過）。
+  - **未実施**: デプロイ・git commit/push（コーディネーターがレビュー後にまとめる）。
+
+- **アルバム動画が再生できない不具合の修正（frontend のみ・ローカル build 検証まで／デプロイ未実施・レビュー待ち）**:
+  ハイライト動画（Azure Blob の SAS URL）が家族側アルバムの `<video>` で再生されない不具合を修正。
+  原因は `frontend/public/staticwebapp.config.json` の CSP で、`img-src` には
+  `https://*.blob.core.windows.net` があるのに `media-src` は `'self' blob: data:` のみだったため、
+  Blob 由来の動画がブロックされていた（サムネ画像は img-src 許可済みで表示されていた）。
+  - **修正**: `media-src` に `https://*.blob.core.windows.net` を追加（`'self' blob: data:
+    https://*.blob.core.windows.net`）。他の CSP ディレクティブ・他の globalHeaders は無変更。
+  - **検証**: JSON valid（`python3 -m json.tool`）／`npm run build` 9/9・Exporting 2/2 成功／
+    `out/staticwebapp.config.json` に変更反映を確認。
+  - **未実施**: デプロイ（統括承認後）・実環境での動画再生の最終確認。git commit/push は未実施
+    （コーディネーターがレビュー後にまとめる）。
+
 ## 現在の状態（2026-07-21）
 
 - **フロントエンド依存のメジャー更新（next 15.5 / React 19 / vitest 4）＋脆弱性掃討＋.snyk 整理
