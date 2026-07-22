@@ -154,6 +154,10 @@ BGM 付きハイライト動画を生成、家族の閲覧 UI と高齢者側の
     - `uuid ^11.1.1`（speech-sdk 経由 9.0.1＝GHSA-w5hq-g745-h8pq。speech-sdk は `uuid.v4()` のみ
       使用し v11 でも named export・CJS を維持＝無破壊）
     - `ws ^8.21.1`（speech-sdk 経由 8.21.0＝SNYK-JS-WS-17988732。npm audit 未検出・snyk test 検出）
+    - `sharp ^0.35.3`（2026-07-23 追加。next 15 同梱 0.34.5＝SNYK-JS-SHARP-18184259／
+      SNYK-JS-SHARP-18184418〈libvips 継承の high 2件・GHSA-f88m-g3jw-g9cj で 0.35.0 修正〉。
+      静的 export で実行時未使用のため実リスク低だが Snyk CI High ゲート対応として追加。
+      next が sharp ≥0.35.0 を自ら宣言したら解除〈解除条件は他 override と同方針〉）
     - **override の解除条件（重要）**: これらは脆弱性対応の**一時固定**である。親の
       `microsoft-cognitiveservices-speech-sdk`（uuid/ws の供給元）や `next`（postcss の供給元）が
       **同等以上のバージョンを自ら宣言したら、この override を削除し依存更新で追随する**
