@@ -28,7 +28,7 @@ import {
   useState,
 } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { endCall, getCandidates, issueCallToken } from "../../lib/api-client";
+import { endCall, getCandidates, getMe, issueCallToken } from "../../lib/api-client";
 import { ApiError } from "../../lib/api-client";
 import {
   CallHandle,
@@ -221,10 +221,23 @@ function CallPageInner() {
     [callId]
   );
 
-  // 自分（家族）の表示名ラベル: Entra の表示名が取れる場合のみ設定する（取れなければ非表示）。
+  // 自分（家族）の表示名ラベル（機能A・v0.7.0）:
+  // 自分で設定した表示名（GET /users/me の display_name）を優先し、未設定なら Entra 表示名へ
+  // フォールバックする。どちらも取れなければラベル非表示（best-effort）。
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      // 1) 自分で設定した表示名（/users/me）を最優先。
+      try {
+        const me = await getMe();
+        if (me.display_name) {
+          if (!cancelled) setSelfDisplayName(me.display_name);
+          return;
+        }
+      } catch {
+        /* /users/me 取得失敗時は Entra フォールバックへ進む */
+      }
+      // 2) フォールバック: Entra の表示名（有効時のみ）。
       if (!isEntraEnabled()) return;
       try {
         const name = await getDisplayName();

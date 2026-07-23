@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: TV電話MVP API
-  version: 0.6.0
+  version: 0.7.0
   description: >
     支給物A4。TV電話サービス「元気にしてる？」のAPI仕様。
 
@@ -35,6 +35,14 @@ info:
     ③ PATCH /devices/{device_id}（家族 Bearer・owner のみ）を新設。デバイスの表示名を更新する
        （30文字まで。空文字・空白のみは未設定＝null 扱い。他家族の device は 404）。
 
+    v0.7.0（家族側メンバーの表示名）の契約変更:
+    ① GET /users/me（家族 Bearer）を新設。認証ユーザー自身の id・role・display_name を返す。
+    ② PATCH /users/me（家族 Bearer・本人のみ）を新設。自分の display_name を更新する
+       （30文字まで。空文字・空白のみは未設定＝null 扱い。owner/viewer とも設定可）。
+    ③ IncomingStatus に caller_display_name（発信した家族メンバー自身の表示名・
+       call.caller_user_id → users.display_name・nullable）を追加。TV側の着信・通話ラベルで
+       family_name より優先表示する。family_name は互換維持のためそのまま残す。
+
 tags:
   - name: tokens
     description: 通話基盤（Agora）・音声認識（Azure Speech）用の短命トークン発行
@@ -48,6 +56,8 @@ tags:
     description: 高齢者側デバイスの初回登録リンク発行
   - name: devices
     description: 高齢者側デバイスの登録（登録トークンからデバイストークンを発行）
+  - name: users
+    description: 家族メンバー自身の情報（表示名の取得・更新）
 
 security:
   - bearerAuth: []
@@ -479,6 +489,49 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+
+  /users/me:
+    get:
+      tags: [users]
+      summary: 自分（認証ユーザー）の情報取得
+      description: >
+        認証ユーザー自身の id・role・display_name を返す（v0.7.0）。
+        本人のレコードのみを対象にする（ユーザーIDを受け取らない＝IDOR の余地がない）。
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 取得成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserMe'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    patch:
+      tags: [users]
+      summary: 自分の表示名の更新（本人のみ）
+      description: >
+        認証ユーザー自身の display_name を更新する（v0.7.0）。本人のレコードのみを対象にする
+        （ユーザーIDを受け取らない＝他人のレコードには触れられない）。owner / viewer とも
+        自分の名前は設定できる。display_name は 30 文字まで。空文字・空白のみは未設定（null）扱い。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserUpdateRequest'
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserMe'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
 
   /devices:
     get:
@@ -955,6 +1008,13 @@ components:
           type: string
           nullable: true
           description: 発信元の家族表示名（incoming=true のとき）
+        caller_display_name:
+          type: string
+          nullable: true
+          description: >
+            発信した家族メンバー自身が設定した表示名（call.caller_user_id →
+            users.display_name・v0.7.0）。未設定・caller 不明は null。TV側の着信・通話ラベルで
+            family_name より優先表示する。
     AnswerResponse:
       type: object
       required: [token, channel_name, uid, expires_at, app_id]
@@ -1115,6 +1175,34 @@ components:
           type: boolean
           description: 常に true（一度きり有効）
           example: true
+
+    # ---- users ----
+    UserUpdateRequest:
+      type: object
+      description: >
+        自分の表示名の更新（v0.7.0）。display_name は 30 文字まで。
+        空文字・空白のみは未設定（null）扱いにする。
+      properties:
+        display_name:
+          type: string
+          maxLength: 30
+          nullable: true
+          description: 家族メンバー自身が設定する表示名（未入力は null）
+    UserMe:
+      type: object
+      required: [id, role, display_name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        role:
+          type: string
+          enum: [owner, viewer]
+          description: 家族内のロール
+        display_name:
+          type: string
+          nullable: true
+          description: 自分で設定した表示名（未設定は null）
 
     # ---- devices ----
     DeviceRegisterRequest:

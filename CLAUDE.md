@@ -83,6 +83,41 @@ BGM 付きハイライト動画を生成、家族の閲覧 UI と高齢者側の
 
 ## 現在の状態（2026-07-23）
 
+- **機能A（家族側メンバーの表示名）＋機能B（TV側待受アルバムの自動ループ再生）実装完了
+  （backend＋frontend・openapi v0.7.0・ブランチ `feature/caller-name-and-standby-album`・
+  ローカルコミットのみ／push・デプロイ・本番マイグレーション未実施・R-1 クロスレビュー待ち）**:
+  - **機能A・DB**: `users.display_name`（String・nullable）を追加。md → `models.py` →
+    マイグレーション `0004_user_display_name`（down_revision=`0003_device_display_name`・同型 nullable
+    列1本・downgrade 非可逆の注意書き）の順で同期。head=0004・オフライン `--sql` 検証 OK（本番未適用）。
+  - **機能A・backend API**: ① `GET /users/me`（require_family・自分の id/role/display_name）新設。
+    ② `PATCH /users/me`（require_family・**本人のみ**＝path/body にユーザーID を取らず認証ユーザー自身の
+    レコードのみ更新＝IDOR の余地なし。30字上限・空白 null 化・owner/viewer とも設定可）新設。実装は
+    `backend/app/api/users.py`（`UserMe`/`UserUpdateRequest` は `schemas.py`）。③ `IncomingStatus` に
+    `caller_display_name`（`calls.caller_user_id` → `users.display_name` を解決・未設定/caller null は null）を
+    追加（`calls.py` の incoming）。`family_name` は互換維持で併存。④ `openapi.yaml` を **v0.7.0** に同期し
+    `openapi-spec-validator`（backend/.venv）通過。
+  - **機能A・frontend**: `api-client.ts` に `UserMe` 型・`getMe()`/`updateMyDisplayName()` と
+    `IncomingStatus.caller_display_name` を追加。家族ホーム `page.tsx` に「自分の設定」モーダル
+    （名前入力・保存・現在値初期表示・成否フィードバック。既存「相手の設定」と同型）。TV側
+    `elder/standby/page.tsx` の相手ラベルを `caller_display_name` 優先 → `family_name` フォールバック →
+    両 null 非表示に変更（着信画面テキストは「かぞく」フォールバック維持）。家族通話 `call/page.tsx` の
+    自分小窓ラベルを `getMe().display_name` 優先 → Entra 表示名フォールバックに変更。
+  - **機能B（B-2・frontend のみ）**: `elder/standby/page.tsx` を待受アルバムの自動ループ再生へ全面改修。
+    待受中に `GET /albums/latest` を取得し全画面背景 `<video autoplay muted loop playsInline>` で自動再生
+    （未生成/404 は静かに非表示）。60秒ごとに再確認し **id/version が変わったときだけ** src 差し替え
+    （SAS は毎回変わるため URL でなく id/version で同一性判定＝ループを途切れさせない）。`<video>` onError
+    時は最新 SAS を再取得して張り直し自動復帰。着信・通話中は effect が early return して停止（video 非表示）、
+    待受復帰で再開。画面隅に小さなミュートトグル（既定ミュート）。既存「さいきんの おもいで を みる」
+    手動再生ボタンと再生フローは**廃止**（自動再生に一本化・統括承認済み。build 出力から当該文字列が消えたことを
+    grep 確認）。差し替え判定・エラー再取得は純粋関数 `frontend/src/modules/standbyAlbum.ts`
+    （`nextOnPoll`/`recoverOnError`）に切り出し vitest 10件で検証。B-1（backend id/version）は事前調査どおり
+    追加実装不要を再確認しクローズ（`AlbumResponse` に id/version 既存）。
+  - **検証（R-2）**: backend `.venv-scan` `pytest` **234 passed**（219→+15＝`test_users_me.py` の GET/PATCH
+    正常系・30字上限・空白 null 化・owner/viewer 双方自分設定可・本人限定〈他人不変〉・incoming の
+    caller_display_name 解決〈設定あり/なし/caller null〉）／frontend `vitest run` **154 passed**（144→+10＝
+    `standbyAlbum.test.ts` の nextOnPoll/recoverOnError）／`npm run build` **9/9・Exporting 2/2**・型エラー0／
+    openapi v0.7.0 validator 通過。**秘匿値は一切触れていない。push・PR・デプロイ・本番マイグレーション適用は未実施**。
+
 - **タスクB: 通話参加者の名前表示（Zoom風ラベル）実装・レビュー・本番デプロイ完了
   （backend＋frontend・openapi v0.6.0・2026-07-23 統括承認）**: 家族（owner）が高齢者側デバイスに
   表示名を付け、通話画面の映像左下に Zoom 風の名前ラベルを表示する。

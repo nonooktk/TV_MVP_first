@@ -128,10 +128,18 @@ def poll_incoming_call(
         return IncomingStatus(incoming=False)
 
     family = db.get(Family, call.family_id)
+    # 発信した家族メンバー自身の表示名（caller_user_id → users.display_name）を解決する。
+    # 未設定・caller 不明（caller_user_id が null）は null（TV側はフォールバック）。
+    # family_name は互換維持のためそのまま残す（v0.7.0）。
+    caller_display_name = None
+    if call.caller_user_id is not None:
+        caller = db.get(User, call.caller_user_id)
+        caller_display_name = caller.display_name if caller else None
     return IncomingStatus(
         incoming=True,
         call_id=call.id,
         family_name=family.name if family else None,
+        caller_display_name=caller_display_name,
     )
 
 

@@ -208,6 +208,16 @@ export interface IncomingStatus {
   incoming: boolean;
   call_id: string | null;
   family_name: string | null;
+  // 発信した家族メンバー自身の表示名（v0.7.0・機能A）。未設定・caller 不明は null。
+  // TV側の着信・通話ラベルで family_name より優先表示する。
+  caller_display_name?: string | null;
+}
+
+// 自分（認証ユーザー）の情報（GET/PATCH /users/me・v0.7.0・機能A）
+export interface UserMe {
+  id: string;
+  role: "owner" | "viewer";
+  display_name: string | null;
 }
 
 export interface AnswerResponse {
@@ -489,6 +499,28 @@ export async function updateDeviceDisplayName(
   displayName: string | null
 ): Promise<DeviceInfo> {
   return request<DeviceInfo>(`/devices/${deviceId}`, {
+    method: "PATCH",
+    auth: "family",
+    body: { display_name: displayName },
+  });
+}
+
+// --- users（自分の表示名・v0.7.0・機能A）--------------------------------------
+
+// 自分（認証ユーザー）の情報を取得する。設定モーダルの現在名初期表示に使う。
+export async function getMe(): Promise<UserMe> {
+  return request<UserMe>("/users/me", {
+    method: "GET",
+    auth: "family",
+  });
+}
+
+// 自分の表示名を更新する（本人のみ・owner/viewer とも設定可）。
+// name を null / 空文字にすると未設定（サーバ側で null 化）になる。
+export async function updateMyDisplayName(
+  displayName: string | null
+): Promise<UserMe> {
+  return request<UserMe>("/users/me", {
     method: "PATCH",
     auth: "family",
     body: { display_name: displayName },

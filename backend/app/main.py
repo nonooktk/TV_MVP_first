@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import albums, calls, devices, links, media, tokens
+from app.api import albums, calls, devices, links, media, tokens, users
 from app.core.config import get_settings
 from app.services.blob import BlobService
 from app.services.queue import QueueService
@@ -97,3 +97,4 @@ app.include_router(media.router)
 app.include_router(albums.router)
 app.include_router(links.router)
 app.include_router(devices.router)
+app.include_router(users.router)
