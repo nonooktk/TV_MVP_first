@@ -103,7 +103,7 @@ export class ApiError extends Error {
 type AuthMode = "family" | "device" | "none";
 
 interface RequestOptions {
-  method?: "GET" | "POST" | "PUT" | "DELETE";
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   auth?: AuthMode;
   body?: unknown;
   query?: Record<string, string | number | undefined>;
@@ -174,6 +174,7 @@ export type CallStatus = "calling" | "active" | "ended";
 export type MemoryType = "photo" | "audio";
 export type MemoryStatus = "candidate" | "selected";
 export type AlbumStatus = "awaiting_selection" | "generating" | "ready";
+export type DeviceStatus = "pending" | "active" | "revoked";
 
 export interface Call {
   id: string;
@@ -192,6 +193,9 @@ export interface CallTokenResponse {
   expires_at: string;
   // Agora App ID（公開値）。SDK join に使う（M1・契約変更①）
   app_id: string;
+  // 相手（高齢者側デバイス）の表示名（家族が設定・v0.6.0・タスクB）。
+  // 未設定なら null（通話画面はラベルを表示しない）
+  remote_display_name: string | null;
 }
 
 export interface SpeechTokenResponse {
@@ -204,6 +208,16 @@ export interface IncomingStatus {
   incoming: boolean;
   call_id: string | null;
   family_name: string | null;
+  // 発信した家族メンバー自身の表示名（v0.7.0・機能A）。未設定・caller 不明は null。
+  // TV側の着信・通話ラベルで family_name より優先表示する。
+  caller_display_name?: string | null;
+}
+
+// 自分（認証ユーザー）の情報（GET/PATCH /users/me・v0.7.0・機能A）
+export interface UserMe {
+  id: string;
+  role: "owner" | "viewer";
+  display_name: string | null;
 }
 
 export interface AnswerResponse {
@@ -285,6 +299,18 @@ export interface RegisterLinkResponse {
 
 export interface DeviceRegisterResponse {
   device_token: string;
+}
+
+// 自家族のデバイス情報（設定モーダルでの現在名表示用・v0.6.0・タスクB）
+export interface DeviceInfo {
+  device_id: string;
+  display_name: string | null;
+  status: DeviceStatus;
+  registered_at: string | null;
+}
+
+export interface DeviceList {
+  items: DeviceInfo[];
 }
 
 export interface MediaRegisterItem {
@@ -455,5 +481,48 @@ export async function registerDevice(
     method: "POST",
     auth: "none",
     body: { registration_token: registrationToken },
+  });
+}
+
+// 自家族のデバイス一覧を取得する（v0.6.0・タスクB）。設定モーダルで現在の表示名を出すのに使う。
+export async function getDevices(): Promise<DeviceList> {
+  return request<DeviceList>("/devices", {
+    method: "GET",
+    auth: "family",
+  });
+}
+
+// デバイスの表示名を更新する（v0.6.0・タスクB。owner のみ・backend が 403 で最終ガード）。
+// name を null / 空文字にすると未設定（サーバ側で null 化）になる。
+export async function updateDeviceDisplayName(
+  deviceId: string,
+  displayName: string | null
+): Promise<DeviceInfo> {
+  return request<DeviceInfo>(`/devices/${deviceId}`, {
+    method: "PATCH",
+    auth: "family",
+    body: { display_name: displayName },
+  });
+}
+
+// --- users（自分の表示名・v0.7.0・機能A）--------------------------------------
+
+// 自分（認証ユーザー）の情報を取得する。設定モーダルの現在名初期表示に使う。
+export async function getMe(): Promise<UserMe> {
+  return request<UserMe>("/users/me", {
+    method: "GET",
+    auth: "family",
+  });
+}
+
+// 自分の表示名を更新する（本人のみ・owner/viewer とも設定可）。
+// name を null / 空文字にすると未設定（サーバ側で null 化）になる。
+export async function updateMyDisplayName(
+  displayName: string | null
+): Promise<UserMe> {
+  return request<UserMe>("/users/me", {
+    method: "PATCH",
+    auth: "family",
+    body: { display_name: displayName },
   });
 }

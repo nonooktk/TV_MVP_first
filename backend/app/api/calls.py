@@ -20,6 +20,7 @@ from app.api.deps import (
     require_family,
     require_family_or_device,
 )
+from app.api.device_selection import device_priority_order
 from app.db.models import Call, Device, Family, User
 from app.schemas import (
     AnswerResponse,
@@ -63,13 +64,15 @@ def create_call(
                 detail={"code": "device_not_active", "message": "デバイスが有効ではありません"},
             )
     else:
+        # 発信解決と GET /devices（設定モーダル）で代表デバイスを揃えるため共通の並びを使う。
+        # active に絞ったうえで先頭を採るため、GET /devices の先頭（active 内で最新）と一致する。
         device = db.scalars(
             select(Device)
             .where(
                 Device.family_id == user.family_id,
                 Device.status == "active",
             )
-            .order_by(Device.registered_at.desc().nulls_last())
+            .order_by(*device_priority_order())
         ).first()
         if device is None:
             raise HTTPException(
@@ -125,10 +128,18 @@ def poll_incoming_call(
         return IncomingStatus(incoming=False)
 
     family = db.get(Family, call.family_id)
+    # 発信した家族メンバー自身の表示名（caller_user_id → users.display_name）を解決する。
+    # 未設定・caller 不明（caller_user_id が null）は null（TV側はフォールバック）。
+    # family_name は互換維持のためそのまま残す（v0.7.0）。
+    caller_display_name = None
+    if call.caller_user_id is not None:
+        caller = db.get(User, call.caller_user_id)
+        caller_display_name = caller.display_name if caller else None
     return IncomingStatus(
         incoming=True,
         call_id=call.id,
         family_name=family.name if family else None,
+        caller_display_name=caller_display_name,
     )
 
 

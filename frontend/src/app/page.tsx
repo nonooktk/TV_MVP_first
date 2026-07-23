@@ -11,7 +11,11 @@ import {
   ApiError,
   createCall,
   getAlbums,
+  getDevices,
+  getMe,
   registerLink,
+  updateDeviceDisplayName,
+  updateMyDisplayName,
 } from "../lib/api-client";
 import { syncPendingCalls } from "../modules/sync";
 import FamilyAuthGate from "../components/FamilyAuthGate";
@@ -68,6 +72,24 @@ function HomePageInner() {
   const [linkError, setLinkError] = useState<string | null>(null);
   const [linkLoading, setLinkLoading] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  // 相手（高齢者側デバイス）の表示名設定（タスクB・Zoom風ラベル用）。
+  // 名前入力欄は owner 前提の UI（サインインで作られる家族ユーザーは全員 owner）。
+  // 非 owner の場合も backend の PATCH が 403 を返す最終ガードで防ぐ。
+  const [deviceId, setDeviceId] = useState<string | null>(null);
+  const [nameInput, setNameInput] = useState("");
+  const [nameSaving, setNameSaving] = useState(false);
+  const [nameFeedback, setNameFeedback] = useState<string | null>(null);
+  const [nameError, setNameError] = useState<string | null>(null);
+
+  // 自分（家族メンバー自身）の表示名設定（機能A・v0.7.0）。
+  // TV側の着信・通話ラベル（caller_display_name）や自分小窓ラベルに使う。
+  // owner / viewer とも自分の名前は設定できる（backend は本人限定）。
+  const [showSelfModal, setShowSelfModal] = useState(false);
+  const [selfNameInput, setSelfNameInput] = useState("");
+  const [selfNameSaving, setSelfNameSaving] = useState(false);
+  const [selfNameFeedback, setSelfNameFeedback] = useState<string | null>(null);
+  const [selfNameError, setSelfNameError] = useState<string | null>(null);
 
   // 計測ログ（トリガーテスト用・通話終了後の回収導線）: NEXT_PUBLIC_MEASUREMENT_UI=1 のときのみ表示。
   const measurementUiEnabled = process.env.NEXT_PUBLIC_MEASUREMENT_UI === "1";
@@ -239,8 +261,16 @@ function HomePageInner() {
     }
   }
 
-  async function handleIssueLink() {
+  // 「相手の設定」を開く。登録リンクを発行しつつ、現在のデバイス表示名を読み込む。
+  function handleOpenSettings() {
     setShowLinkModal(true);
+    setNameFeedback(null);
+    setNameError(null);
+    void handleIssueLink();
+    void loadDeviceName();
+  }
+
+  async function handleIssueLink() {
     setLinkLoading(true);
     setLinkError(null);
     setCopied(false);
@@ -251,6 +281,90 @@ function HomePageInner() {
       setLinkError(e instanceof ApiError ? e.message : "リンクの発行に失敗しました");
     } finally {
       setLinkLoading(false);
+    }
+  }
+
+  // 現在のデバイス表示名を取得して入力欄に初期表示する（1件想定・先頭を採用）。
+  async function loadDeviceName() {
+    try {
+      const res = await getDevices();
+      const device = res.items[0] ?? null;
+      setDeviceId(device?.device_id ?? null);
+      setNameInput(device?.display_name ?? "");
+    } catch {
+      // 取得失敗時は名前欄を空のままにする（保存はデバイス未取得なら不可）。
+      setDeviceId(null);
+    }
+  }
+
+  // 相手の名前を保存する（owner のみ。backend が 403 で最終ガード）。
+  async function handleSaveName() {
+    if (!deviceId) {
+      setNameError("先にデバイスを登録してください");
+      return;
+    }
+    setNameSaving(true);
+    setNameFeedback(null);
+    setNameError(null);
+    try {
+      const trimmed = nameInput.trim();
+      const updated = await updateDeviceDisplayName(deviceId, trimmed ? trimmed : null);
+      setNameInput(updated.display_name ?? "");
+      setNameFeedback(
+        updated.display_name
+          ? `「${updated.display_name}」に設定しました`
+          : "名前を未設定にしました"
+      );
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 403) {
+        setNameError("名前の変更は owner のみ行えます");
+      } else {
+        setNameError(e instanceof ApiError ? e.message : "名前の保存に失敗しました");
+      }
+    } finally {
+      setNameSaving(false);
+    }
+  }
+
+  // 「自分の設定」を開く。現在の自分の表示名を読み込んで入力欄に初期表示する。
+  function handleOpenSelfSettings() {
+    setShowSelfModal(true);
+    setSelfNameFeedback(null);
+    setSelfNameError(null);
+    void loadSelfName();
+  }
+
+  // 現在の自分の表示名を取得して入力欄に初期表示する（GET /users/me）。
+  async function loadSelfName() {
+    try {
+      const me = await getMe();
+      setSelfNameInput(me.display_name ?? "");
+    } catch {
+      // 取得失敗時は空のままにする（保存は可能＝新規設定として動く）。
+      setSelfNameInput("");
+    }
+  }
+
+  // 自分の名前を保存する（本人のみ・owner/viewer とも設定可）。
+  async function handleSaveSelfName() {
+    setSelfNameSaving(true);
+    setSelfNameFeedback(null);
+    setSelfNameError(null);
+    try {
+      const trimmed = selfNameInput.trim();
+      const updated = await updateMyDisplayName(trimmed ? trimmed : null);
+      setSelfNameInput(updated.display_name ?? "");
+      setSelfNameFeedback(
+        updated.display_name
+          ? `「${updated.display_name}」に設定しました`
+          : "名前を未設定にしました"
+      );
+    } catch (e) {
+      setSelfNameError(
+        e instanceof ApiError ? e.message : "名前の保存に失敗しました"
+      );
+    } finally {
+      setSelfNameSaving(false);
     }
   }
 
@@ -347,7 +461,7 @@ function HomePageInner() {
           <button
             className="btn-secondary"
             style={{ marginTop: 8 }}
-            onClick={handleIssueLink}
+            onClick={handleOpenSettings}
           >
             相手の設定から登録する
           </button>
@@ -470,11 +584,80 @@ function HomePageInner() {
         </section>
       )}
 
-      <div style={{ textAlign: "center", marginTop: 8 }}>
-        <button className="link-plain" style={{ background: "none", border: "none", cursor: "pointer" }} onClick={handleIssueLink}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "center",
+          gap: 20,
+          marginTop: 8,
+        }}
+      >
+        <button
+          className="link-plain"
+          data-testid="open-self-settings"
+          style={{ background: "none", border: "none", cursor: "pointer" }}
+          onClick={handleOpenSelfSettings}
+        >
+          自分の設定
+        </button>
+        <button className="link-plain" style={{ background: "none", border: "none", cursor: "pointer" }} onClick={handleOpenSettings}>
           相手の設定
         </button>
       </div>
+
+      {showSelfModal && (
+        <div className="modal-overlay" onClick={() => setShowSelfModal(false)}>
+          <div className="modal-box" onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ marginTop: 0 }}>自分の名前</h3>
+            <p style={{ fontSize: 13, color: "var(--color-text-muted)", marginTop: 0 }}>
+              通話中に相手（TV側）へ表示される、あなたの名前です（例:「たろう」）。
+              未入力にすると表示されません。
+            </p>
+            <input
+              type="text"
+              value={selfNameInput}
+              maxLength={30}
+              placeholder="たろう"
+              onChange={(e) => setSelfNameInput(e.target.value)}
+              data-testid="self-name-input"
+              style={{
+                width: "100%",
+                boxSizing: "border-box",
+                padding: "8px 10px",
+                fontSize: 14,
+                borderRadius: 8,
+                border: "1px solid var(--color-border)",
+                marginBottom: 8,
+              }}
+            />
+            {selfNameFeedback && (
+              <p style={{ fontSize: 13, color: "var(--color-success, #2e7d32)", margin: "0 0 8px" }}>
+                {selfNameFeedback}
+              </p>
+            )}
+            {selfNameError && (
+              <p style={{ fontSize: 13, color: "var(--color-danger)", margin: "0 0 8px" }}>
+                {selfNameError}
+              </p>
+            )}
+            <button
+              className="btn-primary"
+              data-testid="self-name-save"
+              disabled={selfNameSaving}
+              onClick={() => void handleSaveSelfName()}
+            >
+              {selfNameSaving ? "保存中…" : "名前を保存"}
+            </button>
+            <button
+              className="btn-secondary"
+              style={{ marginTop: 10 }}
+              onClick={() => setShowSelfModal(false)}
+            >
+              閉じる
+            </button>
+          </div>
+        </div>
+      )}
 
       {showLinkModal && (
         <div className="modal-overlay" onClick={() => setShowLinkModal(false)}>
@@ -505,6 +688,56 @@ function HomePageInner() {
                 </button>
               </>
             )}
+
+            {/* 相手の名前（通話画面の左下ラベルに表示・タスクB）。owner 前提の UI。 */}
+            <div
+              style={{
+                marginTop: 18,
+                paddingTop: 14,
+                borderTop: "1px solid var(--color-border)",
+              }}
+            >
+              <h3 style={{ margin: "0 0 6px", fontSize: 15 }}>相手の名前</h3>
+              <p style={{ fontSize: 13, color: "var(--color-text-muted)", marginTop: 0 }}>
+                通話画面に表示される名前です（例:「おばあちゃん」）。未入力にすると表示されません。
+              </p>
+              <input
+                type="text"
+                value={nameInput}
+                maxLength={30}
+                placeholder="おばあちゃん"
+                onChange={(e) => setNameInput(e.target.value)}
+                data-testid="device-name-input"
+                style={{
+                  width: "100%",
+                  boxSizing: "border-box",
+                  padding: "8px 10px",
+                  fontSize: 14,
+                  borderRadius: 8,
+                  border: "1px solid var(--color-border)",
+                  marginBottom: 8,
+                }}
+              />
+              {nameFeedback && (
+                <p style={{ fontSize: 13, color: "var(--color-success, #2e7d32)", margin: "0 0 8px" }}>
+                  {nameFeedback}
+                </p>
+              )}
+              {nameError && (
+                <p style={{ fontSize: 13, color: "var(--color-danger)", margin: "0 0 8px" }}>
+                  {nameError}
+                </p>
+              )}
+              <button
+                className="btn-primary"
+                data-testid="device-name-save"
+                disabled={nameSaving}
+                onClick={() => void handleSaveName()}
+              >
+                {nameSaving ? "保存中…" : "名前を保存"}
+              </button>
+            </div>
+
             <button
               className="btn-secondary"
               style={{ marginTop: 10 }}
