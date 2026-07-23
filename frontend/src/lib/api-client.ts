@@ -103,7 +103,7 @@ export class ApiError extends Error {
 type AuthMode = "family" | "device" | "none";
 
 interface RequestOptions {
-  method?: "GET" | "POST" | "PUT" | "DELETE";
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   auth?: AuthMode;
   body?: unknown;
   query?: Record<string, string | number | undefined>;
@@ -174,6 +174,7 @@ export type CallStatus = "calling" | "active" | "ended";
 export type MemoryType = "photo" | "audio";
 export type MemoryStatus = "candidate" | "selected";
 export type AlbumStatus = "awaiting_selection" | "generating" | "ready";
+export type DeviceStatus = "pending" | "active" | "revoked";
 
 export interface Call {
   id: string;
@@ -192,6 +193,9 @@ export interface CallTokenResponse {
   expires_at: string;
   // Agora App ID（公開値）。SDK join に使う（M1・契約変更①）
   app_id: string;
+  // 相手（高齢者側デバイス）の表示名（家族が設定・v0.6.0・タスクB）。
+  // 未設定なら null（通話画面はラベルを表示しない）
+  remote_display_name: string | null;
 }
 
 export interface SpeechTokenResponse {
@@ -285,6 +289,18 @@ export interface RegisterLinkResponse {
 
 export interface DeviceRegisterResponse {
   device_token: string;
+}
+
+// 自家族のデバイス情報（設定モーダルでの現在名表示用・v0.6.0・タスクB）
+export interface DeviceInfo {
+  device_id: string;
+  display_name: string | null;
+  status: DeviceStatus;
+  registered_at: string | null;
+}
+
+export interface DeviceList {
+  items: DeviceInfo[];
 }
 
 export interface MediaRegisterItem {
@@ -455,5 +471,26 @@ export async function registerDevice(
     method: "POST",
     auth: "none",
     body: { registration_token: registrationToken },
+  });
+}
+
+// 自家族のデバイス一覧を取得する（v0.6.0・タスクB）。設定モーダルで現在の表示名を出すのに使う。
+export async function getDevices(): Promise<DeviceList> {
+  return request<DeviceList>("/devices", {
+    method: "GET",
+    auth: "family",
+  });
+}
+
+// デバイスの表示名を更新する（v0.6.0・タスクB。owner のみ・backend が 403 で最終ガード）。
+// name を null / 空文字にすると未設定（サーバ側で null 化）になる。
+export async function updateDeviceDisplayName(
+  deviceId: string,
+  displayName: string | null
+): Promise<DeviceInfo> {
+  return request<DeviceInfo>(`/devices/${deviceId}`, {
+    method: "PATCH",
+    auth: "family",
+    body: { display_name: displayName },
   });
 }
