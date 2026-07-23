@@ -60,6 +60,10 @@ class IncomingStatus(BaseModel):
     incoming: bool
     call_id: UUID | None = None
     family_name: str | None = None
+    # 発信した家族メンバー自身が設定した表示名（call.caller_user_id → users.display_name）。
+    # 未設定・caller 不明は null。TV側の着信・通話ラベルで family_name より優先表示する（v0.7.0）。
+    # family_name は互換維持のためそのまま残す。
+    caller_display_name: str | None = None
 
 
 class AnswerResponse(BaseModel):
@@ -102,6 +106,27 @@ class DeviceInfo(BaseModel):
 
 class DeviceList(BaseModel):
     items: list[DeviceInfo]
+
+
+# --- users（追加・v0.7.0）-----------------------------------------------------
+
+
+class UserUpdateRequest(BaseModel):
+    """自分の表示名の更新リクエスト（PATCH /users/me）。
+
+    display_name は 30 文字までの表示名。空文字・空白のみは「未設定（null）」扱い。
+    PATCH /devices/{device_id}（DeviceUpdateRequest）と同じ規則。
+    """
+
+    display_name: str | None = Field(default=None, max_length=30)
+
+
+class UserMe(BaseModel):
+    """自分（認証ユーザー）の情報（GET/PATCH /users/me）。"""
+
+    id: UUID
+    role: str
+    display_name: str | None = None
 
 
 # --- media --------------------------------------------------------------------
