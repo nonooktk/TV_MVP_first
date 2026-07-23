@@ -113,3 +113,31 @@
 - CSPM のポータル実確認は今回のデルタでは不要（クラウド設定の変更が無いため）。次に Azure リソース設定を変更する際はアクションカードで再実施する。
 - 検査バージョン記録: backend=`tvmvp-api:v13`（rev 0000017）／DB=alembic `0003`／frontend=SWA production（`gray-dune-0117e4d00`）。依存ロックは 2026-07-19/21 レポートの `requirements.lock.txt`／`package-lock.json` を継承。
 - 秘匿値（`.env`／`cloud.env`）は一切出力・コミットしていない。git commit/push は未実施。
+
+---
+
+## ■ 差分監査 第2部（PR #19「家族側表示名＋待受アルバム自動再生」・2026-07-23）
+
+対象は「家族側表示名＋待受アルバム自動再生」の差分（users.display_name 追加・GET/PATCH /users/me 新設・着信応答 caller_display_name・家族ホーム「自分の設定」・TV側待受のアルバム自動ループ再生・手動再生ボタン廃止）。実施はバリヤード、方式は第1部と同じ差分監査5種。
+
+### 総合判定: 合格（本番前必須の指摘ゼロ）
+
+| 深刻度 | 件数 | 内訳 |
+| --- | --- | --- |
+| Blocker / High / Medium | 0 | — |
+| Low（任意対応） | 1 | F-12 |
+| クリア | 5 | /users/me の IDOR・display_name 保存XSS・caller_display_name 越境・CSPM デルタ・DAST 回帰 |
+
+### 実施サマリ
+
+- **SCA**: 依存ファイルの変更 0 件（git stat で実証）。7/19-21 ベースライン有効（.snyk 受容は SNYK-JS-NEXT-15105315 の1件・期限 2027-01-21 内）。
+- **SAST**: Semgrep 5 ルールセットを変更10ファイルへ実行 → 検出 0。display_name は 30字上限＋strip・React 自動エスケープ描画で保存XSSの芽なし。
+- **CSPM**: 今回の Azure デルタは DB の nullable 列1本（0004）のみ。設定変更なし＝非該当。
+- **DAST（受動のみ）**: 本番 SWA のセキュリティヘッダ全項目の継続配信を確認。CSP 不変。
+- **手動 IDOR**: pytest 42 passed。GET/PATCH /users/me は path/body にユーザーIDを取らず認証主体のみ操作＝構造的に越境不可。caller_display_name は着信デバイスと同一家族の caller のみから解決され、他家族の表示名は原理的に出ない。
+
+### F-12（Low・任意対応）: 待受動画 onError→SAS 再取得のバックオフ欠如
+
+`frontend/src/app/elder/standby/page.tsx` の handleVideoError は同時実行こそ防ぐが、恒久的に壊れた動画では onError→再取得の逐次ループが残る。デバイス認証済み・自家族宛のため露出はなく、自己コスト面のみの軽微事項（Sakana クロスレビューの既知指摘と同一）。任意対応として、指数バックオフ＋連続失敗上限（超過時は待受を静止画へフォールバック）を推奨。
+
+※本節は履歴書き換え作業時の `git reset --hard` で一度失われたため 2026-07-23 に復元（内容は監査当日の記録と同一）。
