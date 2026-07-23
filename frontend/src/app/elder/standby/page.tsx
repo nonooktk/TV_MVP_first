@@ -38,6 +38,13 @@ import {
 const POLL_INTERVAL_MS = 3000;
 // 待受アルバムの最新確認の間隔（60秒ごとに GET /albums/latest を再確認する・B-2）。
 const ALBUM_POLL_INTERVAL_MS = 60000;
+// 待受アルバム動画の「遅延開始」までの待ち時間（初期表示が済んでから約5秒後にDL開始・案A）。
+// 意図: 待受マウントと同時に getLatestAlbum() → 動画DL を始めると、画面の初期表示に必要な
+// Next のチャンクDLと動画DLが帯域を奪い合い、初期表示が遅れる。SWA（Static Web Apps）の
+// Free 配信網は配信元が遠く帯域が細いため、まず初期表示を優先し、動画DLは後追いで開始する。
+// この遅延は初回のフェッチ開始タイミングのみに効き、以降の60秒ポーリング・onError 復帰・
+// 着信中の停止などの既存挙動は一切変えない。
+const ALBUM_INITIAL_DEFER_MS = 5000;
 
 type Phase = "standby" | "incoming" | "in_call";
 
@@ -292,11 +299,19 @@ export default function ElderStandbyPage() {
       }
     };
 
-    void check();
-    const t = setInterval(() => void check(), ALBUM_POLL_INTERVAL_MS);
+    // 案A: 初期表示（時計・UIチャンクのDL）が済んでから約5秒後に初回フェッチを開始し、
+    // 初期表示のチャンクDLと動画DLの帯域競合を避ける（ALBUM_INITIAL_DEFER_MS のコメント参照）。
+    // 遅延するのは「初回フェッチの開始」だけで、その後は従来どおり60秒間隔でポーリングする。
+    let poll: ReturnType<typeof setInterval> | null = null;
+    const startTimer = setTimeout(() => {
+      void check();
+      poll = setInterval(() => void check(), ALBUM_POLL_INTERVAL_MS);
+    }, ALBUM_INITIAL_DEFER_MS);
     return () => {
       cancelled = true;
-      clearInterval(t);
+      // アンマウント・phase 遷移時は遅延開始タイマーとポーリングの両方を確実に止める。
+      clearTimeout(startTimer);
+      if (poll) clearInterval(poll);
     };
   }, [hasDeviceToken, phase]);
 
@@ -346,7 +361,10 @@ export default function ElderStandbyPage() {
         ref={ringtoneRef}
         src="/sounds/incoming-call.mp3"
         loop
-        preload="auto"
+        // preload="none": 待受マウント時に着信音を先読みしない（案A・初期ロード帯域の節約）。
+        // 音源は着信検知時の play()（上の effect）で初めて取得される。ファイルは約220KB と小さく、
+        // 着信は120秒失効の猶予があるため、取得遅延は実用上無視できる。
+        preload="none"
         onError={() => {
           // 音源未配置（404）や読み込み失敗は無視する（無音のまま着信表示は継続）。
         }}
