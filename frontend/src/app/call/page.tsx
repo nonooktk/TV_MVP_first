@@ -756,7 +756,7 @@ function CallPageInner() {
         デバッグ
       </button>
 
-      {/* 常設「📊ログ」ボタン（左下・控えめ）: タップで計測ログJSONを即ダウンロードする。
+      {/* 常設「📊ログ」ボタン（左上・控えめ）: タップで計測ログJSONを即ダウンロードする。
           既存のデバッグパネル内「計測ログDL」と同じロジック（handleMeasurementDownload）を
           共有する。NEXT_PUBLIC_MEASUREMENT_UI=1 のときのみ表示。 */}
       {measurementUiEnabled && (
@@ -1199,13 +1199,14 @@ const debugToggleStyle: CSSProperties = {
   cursor: "pointer",
 };
 
-// 常設「📊ログ」ボタン（左下隅・控えめ）。デバッグトグル（右下）と衝突しない位置。
+// 常設「📊ログ」ボタン（左上隅・控えめ）。相手名ラベル（Zoom風・左下）と重ならないよう
+// 計測系UIは左上へ配置（2026-07-23）。デバッグトグル（右下）とも衝突しない位置。
 // NEXT_PUBLIC_MEASUREMENT_UI=1 のときのみ表示。本番公開前に無効化を判断する対象
 // （CLAUDE.md「課題（本番前）」参照）。
 const measurementQuickButtonStyle: CSSProperties = {
   position: "absolute",
   left: 8,
-  bottom: 8,
+  top: 8,
   zIndex: 21,
   background: "rgba(0,0,0,0.5)",
   color: "rgba(255,255,255,0.6)",
@@ -1217,11 +1218,12 @@ const measurementQuickButtonStyle: CSSProperties = {
   cursor: "pointer",
 };
 
-// シナリオ打刻 UI（左下・📊ログボタンの少し上）。通話の邪魔にならない小ささ。
+// シナリオ打刻 UI（左上・📊ログボタンの少し下）。計測系UIを左上へまとめ、相手名ラベル
+// （Zoom風・左下）との重なりを解消（2026-07-23）。通話の邪魔にならない小ささ。
 const scenarioMarkerStyle: CSSProperties = {
   position: "absolute",
   left: 8,
-  bottom: 32,
+  top: 32,
   zIndex: 21,
   display: "flex",
   alignItems: "center",

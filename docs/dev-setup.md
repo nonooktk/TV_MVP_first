@@ -39,6 +39,8 @@ docker compose ps
 cd backend
 uv venv --python 3.11
 uv pip install -r requirements.txt
+# worker を backend/.venv で動かすための追加依存（サムネ/コラージュ=Pillow・ラベリング=openai）
+uv pip install Pillow openai
 ```
 
 以降のコマンドは仮想環境を有効化して実行する:
@@ -46,6 +48,15 @@ uv pip install -r requirements.txt
 ```bash
 source .venv/bin/activate
 ```
+
+> [!important] 正となる仮想環境は `backend/.venv`
+> - **`backend/.venv` が開発・テスト・worker 実行の正**。本ドキュメントおよび frontend の
+>   E2E テスト（child_process で `backend/.venv/bin/python` を実行）はすべてこのパスを参照する。
+> - `backend/.venv-scan` は**セキュリティスキャン用**（pip-audit / cyclonedx 等のツール同居）。
+>   アプリ実行の正としては使わない。
+> - venv は**絶対パスを shebang に焼き込む**ため、リポジトリを移動したら壊れる（2026-07-19 の
+>   `MyDocs/outputs/TV_MVP` → `toolmaker/apps/TV_MVP` 移設で `.venv/bin/*` が bad interpreter に
+>   なった実例あり）。移動後は `.venv` を削除して上記コマンドで作り直すこと。
 
 ## 3. 環境変数（.env）
 
