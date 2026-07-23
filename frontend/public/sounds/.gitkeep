@@ -1,0 +1,4 @@
+# 着信音（call音）の配置ディレクトリ。
+# 待受画面（elder/standby）は着信時に /sounds/incoming-call.mp3 をループ再生する。
+# 音源ファイル本体（incoming-call.mp3）は別途配置する。未配置なら無音のまま着信表示は機能する。
+# 配置後は SWA（Static Web Apps）の再配信（再デプロイ）が必要（public 配下は静的アセットのため）。

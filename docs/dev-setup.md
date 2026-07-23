@@ -533,6 +533,13 @@ az storage cors add --services b --methods GET PUT OPTIONS HEAD \
   --allowed-headers "*" --exposed-headers "*" --max-age 3600 --connection-string "$STCONN"
 ```
 
+### 13-3b. 待受画面の着信音（call音）の配置（2026-07-23・変更2）
+
+高齢者側 待受画面（`/elder/standby`）は着信中に `/sounds/incoming-call.mp3` をループ再生する。
+音源本体は `frontend/public/sounds/incoming-call.mp3` に配置する（リポジトリには `.gitkeep` のみ）。
+未配置なら 404 になるが握りつぶして無音のまま着信表示は機能する（自動再生ブロック時も無音）。
+**音源を配置・差し替えたら SWA を再配信（再デプロイ・§13-3）する**（public 配下は静的アセットのため）。
+
 ### 13-4. Agora シークレットの設定（ユーザーが実施）
 
 A1 では Agora の秘密を扱っていない。お手元の `backend/.env` の `AGORA_APP_ID` /
