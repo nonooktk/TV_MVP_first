@@ -151,6 +151,28 @@ def test_call_token(client, seeded, family_headers):
     # uid ルール（M1）: 家族=1。app_id（公開値）も応答に含まれる（契約変更①）。
     assert body["uid"] == 1
     assert body["app_id"]
+    # 相手（高齢者側デバイス）の表示名。未設定なら null（v0.6.0・タスクB）。
+    assert body["remote_display_name"] is None
+
+
+def test_call_token_includes_remote_display_name(client, seeded, db, family_headers):
+    """デバイスに display_name を設定すると /tokens/call が remote_display_name を返す（v0.6.0）。"""
+    from app.db.models import Device
+
+    device = db.get(Device, seeded["device_id"])
+    device.display_name = "おばあちゃん"
+    db.commit()
+
+    call = client.post(
+        "/calls",
+        headers=family_headers,
+        json={"device_id": str(seeded["device_id"])},
+    ).json()
+    res = client.post(
+        "/tokens/call", headers=family_headers, json={"call_id": call["id"]}
+    )
+    assert res.status_code == 200
+    assert res.json()["remote_display_name"] == "おばあちゃん"
 
 
 def test_speech_token(client, seeded, family_headers):

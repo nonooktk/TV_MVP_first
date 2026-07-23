@@ -11,7 +11,9 @@ import {
   ApiError,
   createCall,
   getAlbums,
+  getDevices,
   registerLink,
+  updateDeviceDisplayName,
 } from "../lib/api-client";
 import { syncPendingCalls } from "../modules/sync";
 import FamilyAuthGate from "../components/FamilyAuthGate";
@@ -68,6 +70,15 @@ function HomePageInner() {
   const [linkError, setLinkError] = useState<string | null>(null);
   const [linkLoading, setLinkLoading] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  // 相手（高齢者側デバイス）の表示名設定（タスクB・Zoom風ラベル用）。
+  // 名前入力欄は owner 前提の UI（サインインで作られる家族ユーザーは全員 owner）。
+  // 非 owner の場合も backend の PATCH が 403 を返す最終ガードで防ぐ。
+  const [deviceId, setDeviceId] = useState<string | null>(null);
+  const [nameInput, setNameInput] = useState("");
+  const [nameSaving, setNameSaving] = useState(false);
+  const [nameFeedback, setNameFeedback] = useState<string | null>(null);
+  const [nameError, setNameError] = useState<string | null>(null);
 
   // 計測ログ（トリガーテスト用・通話終了後の回収導線）: NEXT_PUBLIC_MEASUREMENT_UI=1 のときのみ表示。
   const measurementUiEnabled = process.env.NEXT_PUBLIC_MEASUREMENT_UI === "1";
@@ -239,8 +250,16 @@ function HomePageInner() {
     }
   }
 
-  async function handleIssueLink() {
+  // 「相手の設定」を開く。登録リンクを発行しつつ、現在のデバイス表示名を読み込む。
+  function handleOpenSettings() {
     setShowLinkModal(true);
+    setNameFeedback(null);
+    setNameError(null);
+    void handleIssueLink();
+    void loadDeviceName();
+  }
+
+  async function handleIssueLink() {
     setLinkLoading(true);
     setLinkError(null);
     setCopied(false);
@@ -251,6 +270,48 @@ function HomePageInner() {
       setLinkError(e instanceof ApiError ? e.message : "リンクの発行に失敗しました");
     } finally {
       setLinkLoading(false);
+    }
+  }
+
+  // 現在のデバイス表示名を取得して入力欄に初期表示する（1件想定・先頭を採用）。
+  async function loadDeviceName() {
+    try {
+      const res = await getDevices();
+      const device = res.items[0] ?? null;
+      setDeviceId(device?.device_id ?? null);
+      setNameInput(device?.display_name ?? "");
+    } catch {
+      // 取得失敗時は名前欄を空のままにする（保存はデバイス未取得なら不可）。
+      setDeviceId(null);
+    }
+  }
+
+  // 相手の名前を保存する（owner のみ。backend が 403 で最終ガード）。
+  async function handleSaveName() {
+    if (!deviceId) {
+      setNameError("先にデバイスを登録してください");
+      return;
+    }
+    setNameSaving(true);
+    setNameFeedback(null);
+    setNameError(null);
+    try {
+      const trimmed = nameInput.trim();
+      const updated = await updateDeviceDisplayName(deviceId, trimmed ? trimmed : null);
+      setNameInput(updated.display_name ?? "");
+      setNameFeedback(
+        updated.display_name
+          ? `「${updated.display_name}」に設定しました`
+          : "名前を未設定にしました"
+      );
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 403) {
+        setNameError("名前の変更は owner のみ行えます");
+      } else {
+        setNameError(e instanceof ApiError ? e.message : "名前の保存に失敗しました");
+      }
+    } finally {
+      setNameSaving(false);
     }
   }
 
@@ -347,7 +408,7 @@ function HomePageInner() {
           <button
             className="btn-secondary"
             style={{ marginTop: 8 }}
-            onClick={handleIssueLink}
+            onClick={handleOpenSettings}
           >
             相手の設定から登録する
           </button>
@@ -471,7 +532,7 @@ function HomePageInner() {
       )}
 
       <div style={{ textAlign: "center", marginTop: 8 }}>
-        <button className="link-plain" style={{ background: "none", border: "none", cursor: "pointer" }} onClick={handleIssueLink}>
+        <button className="link-plain" style={{ background: "none", border: "none", cursor: "pointer" }} onClick={handleOpenSettings}>
           相手の設定
         </button>
       </div>
@@ -505,6 +566,56 @@ function HomePageInner() {
                 </button>
               </>
             )}
+
+            {/* 相手の名前（通話画面の左下ラベルに表示・タスクB）。owner 前提の UI。 */}
+            <div
+              style={{
+                marginTop: 18,
+                paddingTop: 14,
+                borderTop: "1px solid var(--color-border)",
+              }}
+            >
+              <h3 style={{ margin: "0 0 6px", fontSize: 15 }}>相手の名前</h3>
+              <p style={{ fontSize: 13, color: "var(--color-text-muted)", marginTop: 0 }}>
+                通話画面に表示される名前です（例:「おばあちゃん」）。未入力にすると表示されません。
+              </p>
+              <input
+                type="text"
+                value={nameInput}
+                maxLength={30}
+                placeholder="おばあちゃん"
+                onChange={(e) => setNameInput(e.target.value)}
+                data-testid="device-name-input"
+                style={{
+                  width: "100%",
+                  boxSizing: "border-box",
+                  padding: "8px 10px",
+                  fontSize: 14,
+                  borderRadius: 8,
+                  border: "1px solid var(--color-border)",
+                  marginBottom: 8,
+                }}
+              />
+              {nameFeedback && (
+                <p style={{ fontSize: 13, color: "var(--color-success, #2e7d32)", margin: "0 0 8px" }}>
+                  {nameFeedback}
+                </p>
+              )}
+              {nameError && (
+                <p style={{ fontSize: 13, color: "var(--color-danger)", margin: "0 0 8px" }}>
+                  {nameError}
+                </p>
+              )}
+              <button
+                className="btn-primary"
+                data-testid="device-name-save"
+                disabled={nameSaving}
+                onClick={() => void handleSaveName()}
+              >
+                {nameSaving ? "保存中…" : "名前を保存"}
+              </button>
+            </div>
+
             <button
               className="btn-secondary"
               style={{ marginTop: 10 }}
