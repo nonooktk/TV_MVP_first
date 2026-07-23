@@ -27,6 +27,7 @@ import {
   recoverOnError,
   type PlayingAlbum,
 } from "../../../modules/standbyAlbum";
+import { ringtoneAction } from "../../../modules/incomingRingtone";
 import {
   CallHandle,
   startCall,
@@ -79,6 +80,9 @@ export default function ElderStandbyPage() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  // 着信音（call音）の <audio> と、その再生中フラグ（開始/停止判定の再入防止に使う・変更2）。
+  const ringtoneRef = useRef<HTMLAudioElement | null>(null);
+  const ringingRef = useRef(false);
   const remoteRef = useRef<HTMLDivElement | null>(null);
   const localRef = useRef<HTMLDivElement | null>(null);
   const handleRef = useRef<CallHandle | null>(null);
@@ -144,6 +148,41 @@ export default function ElderStandbyPage() {
     const t = setInterval(() => setElapsed(Math.floor((Date.now() - callStartedAt) / 1000)), 1000);
     return () => clearInterval(t);
   }, [phase, callStartedAt]);
+
+  // 着信音（call音）のループ再生（変更2）。
+  // フェーズが incoming の間だけ /sounds/incoming-call.mp3 をループ再生し、応答（in_call）・
+  // 着信失効（standby 復帰）・通話遷移のいずれでも止める（判定は純粋関数 ringtoneAction）。
+  // 音源未配置（404）やブラウザの自動再生ブロックでも壊れないよう、失敗はすべて握りつぶし、
+  // 視覚的な着信表示（incoming 画面）は従来どおり機能させる。
+  useEffect(() => {
+    const audio = ringtoneRef.current;
+    if (!audio) return;
+    const action = ringtoneAction(ringingRef.current, phase);
+    if (action === "start") {
+      ringingRef.current = true;
+      // play() は Promise を返す。自動再生ポリシーでブロックされると reject するが、
+      // 視覚的な着信表示は継続させたいので握りつぶして無音で続行する。
+      void audio.play().catch(() => {
+        // 自動再生ブロック時も無音（着信表示は機能する）。次回ユーザー操作後の再生に委ねる。
+      });
+    } else if (action === "stop") {
+      ringingRef.current = false;
+      audio.pause();
+      // 次の着信で先頭から鳴らせるよう再生位置を戻す（失敗は無視）。
+      try {
+        audio.currentTime = 0;
+      } catch {
+        // currentTime の設定に失敗しても停止自体は成立しているので無視する。
+      }
+    }
+  }, [phase]);
+
+  // アンマウント時に着信音を確実に止める（保険。通常はフェーズ遷移で停止する）。
+  useEffect(() => {
+    return () => {
+      ringtoneRef.current?.pause();
+    };
+  }, []);
 
   /** 通話状態をすべて片付けて待受へ戻る（leave 済みであること）。 */
   const resetToStandby = useCallback(() => {
@@ -298,6 +337,22 @@ export default function ElderStandbyPage() {
 
   return (
     <div className="elder-shell">
+      {/* 着信音（call音・変更2）。着信（incoming）の間だけ上の effect がループ再生する。
+          音源ファイルは frontend/public/sounds/incoming-call.mp3 に配置する（別途配置）。
+          音源が未配置なら 404 になるが onError で握りつぶして無音のまま着信表示を機能させる。
+          自動再生ポリシーでブロックされた場合も play() の reject を握りつぶし無音で継続する。
+          ※ 音源を配置・差し替えたら SWA（Static Web Apps）の再配信（再デプロイ）が必要。 */}
+      <audio
+        ref={ringtoneRef}
+        src="/sounds/incoming-call.mp3"
+        loop
+        preload="auto"
+        onError={() => {
+          // 音源未配置（404）や読み込み失敗は無視する（無音のまま着信表示は継続）。
+        }}
+        data-testid="incoming-ringtone"
+      />
+
       {phase === "standby" && (
         <>
           {/* 待受アルバムの自動ループ再生（B-2）: 最新ハイライト動画を全画面背景で流す。
@@ -350,21 +405,32 @@ export default function ElderStandbyPage() {
             </>
           )}
 
-          {/* 時計・日付・状態（アルバム再生中はその上に重ねて表示する）。 */}
+          {/* 時計・日付・状態（変更1）。
+              従来は画面中央に大きく表示し、背景のアルバム動画・写真と重なっていた。これを
+              画面左上（left:24 / top:24）へ固定配置し、ひとまわり小さく（現行の約6.5〜7割）した。
+              高齢者・子供が離れて見る画面のため、時刻は視認性を保てる大きさに留める。
+              背景アルバム動画（zIndex:0）の上・右上のミュートボタン（right/top:2vw・zIndex:3）とは
+              位置が離れており重ならない。フォントサイズは各要素で個別に上書きする
+              （elder-clock 10vw→6.5vw／elder-date 3vw→2vw／elder-status 2.4vw→1.6vw）。 */}
           <div
             style={{
-              position: "relative",
+              position: "fixed",
+              left: 24,
+              top: 24,
               zIndex: 1,
+              textAlign: "left",
               textShadow: playing ? "0 2px 8px rgba(0,0,0,0.8)" : undefined,
             }}
           >
-            <div className="elder-clock">
+            <div className="elder-clock" style={{ fontSize: "6.5vw" }}>
               {pad(now.getHours())}:{pad(now.getMinutes())}
             </div>
-            <div className="elder-date">
+            <div className="elder-date" style={{ fontSize: "2vw", marginTop: 6 }}>
               {now.getFullYear()}年{now.getMonth() + 1}月{now.getDate()}日
             </div>
-            <div className="elder-status">● つながっています</div>
+            <div className="elder-status" style={{ fontSize: "1.6vw", marginTop: 10 }}>
+              ● つながっています
+            </div>
           </div>
         </>
       )}
