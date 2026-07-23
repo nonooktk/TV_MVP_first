@@ -15,15 +15,18 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Album,
   AnswerResponse,
-  ApiError,
   answerCall,
   endCall,
   getDeviceToken,
   getLatestAlbum,
   pollIncomingCall,
 } from "../../../lib/api-client";
+import {
+  nextOnPoll,
+  recoverOnError,
+  type PlayingAlbum,
+} from "../../../modules/standbyAlbum";
 import {
   CallHandle,
   startCall,
@@ -32,6 +35,8 @@ import {
 } from "../../../modules/call/agoraCall";
 
 const POLL_INTERVAL_MS = 3000;
+// 待受アルバムの最新確認の間隔（60秒ごとに GET /albums/latest を再確認する・B-2）。
+const ALBUM_POLL_INTERVAL_MS = 60000;
 
 type Phase = "standby" | "incoming" | "in_call";
 
@@ -51,7 +56,9 @@ function pad(n: number): string {
 export default function ElderStandbyPage() {
   const now = useClock();
   const [phase, setPhase] = useState<Phase>("standby");
-  const [familyName, setFamilyName] = useState<string | null>(null);
+  // 相手（発信者）の表示ラベル。着信ポーリングの caller_display_name 優先 → family_name
+  // フォールバックで解決した値（両方 null なら null＝ラベル非表示）。機能A・A-4。
+  const [callerName, setCallerName] = useState<string | null>(null);
   const [callId, setCallId] = useState<string | null>(null);
   const [answerData, setAnswerData] = useState<AnswerResponse | null>(null);
   const [callStartedAt, setCallStartedAt] = useState<number | null>(null);
@@ -59,9 +66,17 @@ export default function ElderStandbyPage() {
   const [hasDeviceToken, setHasDeviceToken] = useState<boolean | null>(null);
   const [callNotice, setCallNotice] = useState<string | null>(null);
 
-  const [videoUrl, setVideoUrl] = useState<string | null>(null);
-  const [videoLoading, setVideoLoading] = useState(false);
-  const [videoError, setVideoError] = useState<string | null>(null);
+  // 待受アルバムの自動ループ再生（B-2）。playing=現在再生中の再生対象（未再生は null）。
+  // muted=音声ミュート（既定ミュート。ミュートでないと自動再生がブラウザにブロックされる）。
+  const [playing, setPlaying] = useState<PlayingAlbum | null>(null);
+  const [muted, setMuted] = useState(true);
+  // check() から最新の再生中識別子を参照するための ref（差し替え判定用）。
+  const playingRef = useRef<PlayingAlbum | null>(null);
+  playingRef.current = playing;
+  // onError 再取得の多重実行防止（連続エラー時のフェッチ暴走を防ぐ）。
+  const recoveringRef = useRef(false);
+  // <video> 要素（muted プロパティを ref 経由で同期する。React の muted 属性は不安定なため）。
+  const videoRef = useRef<HTMLVideoElement | null>(null);
 
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const remoteRef = useRef<HTMLDivElement | null>(null);
@@ -102,7 +117,9 @@ export default function ElderStandbyPage() {
       const status = await pollIncomingCall();
       if (status.incoming && status.call_id) {
         setCallId((prev) => (prev === status.call_id ? prev : status.call_id));
-        setFamilyName(status.family_name ?? "かぞく");
+        // 相手名: 発信者自身の表示名（caller_display_name）を優先し、無ければ家族名
+        // （family_name）へフォールバック。両方 null なら null（in_call ラベルは非表示）。
+        setCallerName(status.caller_display_name ?? status.family_name ?? null);
         setPhase((prev) => (prev === "in_call" ? prev : "incoming"));
       } else {
         setPhase((prev) => (prev === "in_call" ? prev : "standby"));
@@ -215,26 +232,56 @@ export default function ElderStandbyPage() {
     resetToStandby();
   }
 
-  async function handleShowMemory() {
-    setVideoLoading(true);
-    setVideoError(null);
+  // 待受アルバムの自動ループ再生（B-2）。
+  // 待受中（phase=standby・デバイス登録済み）のみ、GET /albums/latest を取得して
+  // 全画面背景で自動再生する。60秒ごとに再確認し、id/version が変わったときだけ src を
+  // 差し替える（差し替え判定は純粋関数 nextOnPoll）。404 等は静かに無視（現在の再生を維持）。
+  // 着信・通話中は effect が early return して再生を止め（video も非表示）、待受復帰で再開する。
+  useEffect(() => {
+    if (hasDeviceToken !== true || phase !== "standby") return;
+    let cancelled = false;
+
+    const check = async (): Promise<void> => {
+      try {
+        const album = await getLatestAlbum();
+        if (cancelled) return;
+        const next = nextOnPoll(playingRef.current, album);
+        if (next) setPlaying(next);
+      } catch {
+        // 404（アルバム未生成）・通信エラーは静かに無視する（現在の再生は維持。
+        // 初期状態では playing=null のまま＝何も表示しない）。
+      }
+    };
+
+    void check();
+    const t = setInterval(() => void check(), ALBUM_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [hasDeviceToken, phase]);
+
+  // <video> の onError（SAS 15分期限切れ等）→ 最新 SAS を再取得して張り直し自動復帰（B-2）。
+  // 識別子が同一でも SAS は変わるため recoverOnError は常に新しい再生対象を返す。
+  // recoveringRef で多重実行を防ぎ、連続エラー時のフェッチ暴走を避ける。
+  const handleVideoError = useCallback(async (): Promise<void> => {
+    if (recoveringRef.current) return;
+    recoveringRef.current = true;
     try {
-      const album: Album = await getLatestAlbum();
-      if (album.video_sas_url) {
-        setVideoUrl(album.video_sas_url);
-      } else {
-        setVideoError("まだ どうがが ありません");
-      }
-    } catch (e) {
-      if (e instanceof ApiError && e.status === 404) {
-        setVideoError("まだ おもいでは ありません");
-      } else {
-        setVideoError("つうしんエラーが おきました");
-      }
+      const album = await getLatestAlbum();
+      const next = recoverOnError(album);
+      if (next) setPlaying(next);
+    } catch {
+      // 復帰できない場合は静かに何もしない（次の定期確認で再取得される）。
     } finally {
-      setVideoLoading(false);
+      recoveringRef.current = false;
     }
-  }
+  }, []);
+
+  // muted の同期（React の muted 属性は反映が不安定なため DOM プロパティで確実に設定する）。
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.muted = muted;
+  }, [muted, playing]);
 
   if (hasDeviceToken === false) {
     return (
@@ -251,52 +298,81 @@ export default function ElderStandbyPage() {
 
   return (
     <div className="elder-shell">
-      {videoUrl && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "#000",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 30,
-          }}
-        >
-          <video src={videoUrl} controls autoPlay style={{ maxWidth: "100%", maxHeight: "100%" }} />
-          <button
-            className="btn-hangup"
-            style={{ position: "absolute", top: 20, right: 20 }}
-            onClick={() => setVideoUrl(null)}
-          >
-            とじる
-          </button>
-        </div>
-      )}
-
-      {phase === "standby" && !videoUrl && (
+      {phase === "standby" && (
         <>
-          <div className="elder-clock">
-            {pad(now.getHours())}:{pad(now.getMinutes())}
-          </div>
-          <div className="elder-date">
-            {now.getFullYear()}年{now.getMonth() + 1}月{now.getDate()}日
-          </div>
-          <div className="elder-status">● つながっています</div>
-
-          <button className="btn-elder-action" onClick={handleShowMemory} disabled={videoLoading}>
-            {videoLoading ? "よみこみちゅう…" : "さいきんの おもいで を みる"}
-          </button>
-          {videoError && (
-            <div style={{ marginTop: 16, fontSize: "2vw", color: "#ffd7c9" }}>{videoError}</div>
+          {/* 待受アルバムの自動ループ再生（B-2）: 最新ハイライト動画を全画面背景で流す。
+              未生成（playing=null）のときは何も出さず、従来どおり時計だけを表示する。
+              key を id/version にして、別アルバムに変わったときはクリーンに再マウントする
+              （同一アルバムの SAS 張り直し〈onError〉では key 不変・src だけ更新でループ継続）。 */}
+          {playing && (
+            <>
+              <video
+                ref={videoRef}
+                key={`${playing.id}:${playing.version}`}
+                src={playing.videoUrl}
+                autoPlay
+                muted={muted}
+                loop
+                playsInline
+                onError={() => void handleVideoError()}
+                data-testid="standby-album-video"
+                style={{
+                  position: "fixed",
+                  inset: 0,
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "cover",
+                  background: "#000",
+                  zIndex: 0,
+                }}
+              />
+              {/* 画面隅の小さなミュート切替（既定ミュート・タップで音声オン/オフ）。 */}
+              <button
+                data-testid="standby-mute-toggle"
+                onClick={() => setMuted((v) => !v)}
+                title={muted ? "音を出す" : "音を消す"}
+                style={{
+                  position: "fixed",
+                  right: "2vw",
+                  top: "2vw",
+                  zIndex: 3,
+                  background: "rgba(0,0,0,0.5)",
+                  color: "#fff",
+                  border: "1px solid rgba(255,255,255,0.35)",
+                  borderRadius: 999,
+                  fontSize: "1.8vw",
+                  padding: "0.6vw 1.6vw",
+                  cursor: "pointer",
+                }}
+              >
+                {muted ? "🔇 おと オフ" : "🔊 おと オン"}
+              </button>
+            </>
           )}
+
+          {/* 時計・日付・状態（アルバム再生中はその上に重ねて表示する）。 */}
+          <div
+            style={{
+              position: "relative",
+              zIndex: 1,
+              textShadow: playing ? "0 2px 8px rgba(0,0,0,0.8)" : undefined,
+            }}
+          >
+            <div className="elder-clock">
+              {pad(now.getHours())}:{pad(now.getMinutes())}
+            </div>
+            <div className="elder-date">
+              {now.getFullYear()}年{now.getMonth() + 1}月{now.getDate()}日
+            </div>
+            <div className="elder-status">● つながっています</div>
+          </div>
         </>
       )}
 
-      {phase === "incoming" && !videoUrl && (
+      {phase === "incoming" && (
         <div className="elder-incoming">
           <div className="elder-incoming-text">
-            {familyName} から
+            {callerName ?? "かぞく"} から
             <br />
             でんわが きています
           </div>
@@ -306,7 +382,7 @@ export default function ElderStandbyPage() {
         </div>
       )}
 
-      {phase === "in_call" && !videoUrl && (
+      {phase === "in_call" && (
         <div
           style={{
             position: "fixed",
@@ -317,6 +393,32 @@ export default function ElderStandbyPage() {
         >
           {/* 相手映像（全画面・WF-01③）。Agora RemoteVideoTrack の描画先 */}
           <div ref={remoteRef} style={{ position: "absolute", inset: 0 }} />
+
+          {/* 相手の名前ラベル（Zoom風・左下）。caller_display_name 優先 → family_name
+              フォールバックで解決した callerName（両方 null なら非表示）。機能A・A-4。 */}
+          {callerName && (
+            <div
+              data-testid="elder-remote-name-label"
+              style={{
+                position: "absolute",
+                left: "3vw",
+                bottom: "3vw",
+                maxWidth: "50%",
+                background: "rgba(0,0,0,0.55)",
+                color: "#fff",
+                padding: "0.5vw 1.4vw",
+                borderRadius: 10,
+                fontSize: "2.2vw",
+                fontWeight: 700,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                zIndex: 22,
+              }}
+            >
+              {callerName}
+            </div>
+          )}
 
           {/* 自分映像（小さく・左下）。publish 中のカメラ確認用 */}
           <div

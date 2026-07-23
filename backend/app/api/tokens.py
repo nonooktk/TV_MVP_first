@@ -16,7 +16,7 @@ from app.api.deps import (
     get_speech_provider,
     require_family,
 )
-from app.db.models import Call, User
+from app.db.models import Call, Device, User
 from app.schemas import CallTokenRequest, CallTokenResponse, SpeechTokenResponse
 from app.services.agora import UID_FAMILY, AgoraTokenProvider
 from app.services.speech import SpeechTokenProvider
@@ -40,12 +40,16 @@ def issue_call_token(
         )
     # uid ルール: 家族=1（UID_FAMILY）。M2 で uid=2 の高齢者ストリームに検知を接続する。
     tok = agora.issue(call.channel_name, uid=UID_FAMILY)
+    # 相手（高齢者側デバイス）の表示名を引く。未設定なら null（フロントはラベル非表示）。
+    device = db.get(Device, call.device_id)
+    remote_display_name = device.display_name if device else None
     return CallTokenResponse(
         token=tok.token,
         channel_name=tok.channel_name,
         uid=tok.uid,
         expires_at=tok.expires_at,
         app_id=agora.app_id,
+        remote_display_name=remote_display_name,
     )
 
 

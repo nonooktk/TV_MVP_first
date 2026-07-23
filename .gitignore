@@ -51,3 +51,6 @@ backend/cloud.env
 
 # Claude Code ローカル設定（セッション用）
 .claude/
+
+# Claude 用プロジェクトメモリ（ローカル専用・リポジトリ管理外）
+CLAUDE.md

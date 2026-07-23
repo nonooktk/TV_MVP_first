@@ -28,7 +28,7 @@ import {
   useState,
 } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { endCall, getCandidates, issueCallToken } from "../../lib/api-client";
+import { endCall, getCandidates, getMe, issueCallToken } from "../../lib/api-client";
 import { ApiError } from "../../lib/api-client";
 import {
   CallHandle,
@@ -50,6 +50,7 @@ import { DEFAULT_FACE_TRIGGER_PARAMS } from "../../modules/detection/faceTrigger
 import { countByCall } from "../../modules/detection/storage";
 import { syncCallMedia } from "../../modules/sync";
 import FamilyAuthGate from "../../components/FamilyAuthGate";
+import { getDisplayName, isEntraEnabled } from "../../lib/auth";
 
 // 相手退出後の遷移前クッション（ms）
 const AUTO_LEAVE_DELAY_MS = 800;
@@ -100,6 +101,12 @@ function CallPageInner() {
   const [phase, setPhase] = useState<Phase>("connecting");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
+
+  // 通話参加者の名前ラベル（タスクB・Zoom風）。
+  // 相手（高齢者）の名前は /tokens/call の remote_display_name。未設定なら null（ラベル非表示）。
+  const [remoteDisplayName, setRemoteDisplayName] = useState<string | null>(null);
+  // 自分（家族）の名前は Entra の表示名が取れる場合のみ（取得不可なら null＝非表示）。
+  const [selfDisplayName, setSelfDisplayName] = useState<string | null>(null);
 
   // 検知の実状態（バッジ表示用）
   const [detecting, setDetecting] = useState(false);
@@ -214,6 +221,36 @@ function CallPageInner() {
     [callId]
   );
 
+  // 自分（家族）の表示名ラベル（機能A・v0.7.0）:
+  // 自分で設定した表示名（GET /users/me の display_name）を優先し、未設定なら Entra 表示名へ
+  // フォールバックする。どちらも取れなければラベル非表示（best-effort）。
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      // 1) 自分で設定した表示名（/users/me）を最優先。
+      try {
+        const me = await getMe();
+        if (me.display_name) {
+          if (!cancelled) setSelfDisplayName(me.display_name);
+          return;
+        }
+      } catch {
+        /* /users/me 取得失敗時は Entra フォールバックへ進む */
+      }
+      // 2) フォールバック: Entra の表示名（有効時のみ）。
+      if (!isEntraEnabled()) return;
+      try {
+        const name = await getDisplayName();
+        if (!cancelled) setSelfDisplayName(name);
+      } catch {
+        /* 表示名が取れない場合はラベルを出さない（best-effort） */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // join シーケンス（attempt が進むたびにやり直す）
   useEffect(() => {
     if (!callId) {
@@ -229,6 +266,8 @@ function CallPageInner() {
         setPhase("connecting");
         const tok = await issueCallToken(callId);
         if (cancelled) return;
+        // 相手（高齢者）の表示名ラベル。未設定なら null のまま（ラベル非表示）。
+        setRemoteDisplayName(tok.remote_display_name ?? null);
         handle = await startCall({
           appId: tok.app_id,
           channel: tok.channel_name,
@@ -449,6 +488,31 @@ function CallPageInner() {
       {/* 相手映像（大） */}
       <div ref={remoteRef} style={{ position: "absolute", inset: 0, background: "#000" }} />
 
+      {/* 相手（高齢者）の名前ラベル（Zoom風・左下）。未設定なら表示しない。 */}
+      {remoteDisplayName && (phase === "in_call" || phase === "connecting") && (
+        <div
+          data-testid="remote-name-label"
+          style={{
+            position: "absolute",
+            left: 16,
+            bottom: 24,
+            maxWidth: "60%",
+            background: "rgba(0,0,0,0.55)",
+            color: "#fff",
+            padding: "4px 12px",
+            borderRadius: 8,
+            fontSize: 14,
+            fontWeight: 600,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            zIndex: 6,
+          }}
+        >
+          {remoteDisplayName}
+        </div>
+      )}
+
       {/* 自分映像（小窓） */}
       <div
         ref={localRef}
@@ -465,6 +529,31 @@ function CallPageInner() {
           zIndex: 5,
         }}
       />
+
+      {/* 自分（家族）の名前ラベル（小窓の左下・小さめ）。取得できた場合のみ。 */}
+      {selfDisplayName && (
+        <div
+          data-testid="self-name-label"
+          style={{
+            position: "absolute",
+            right: 20,
+            bottom: 100,
+            maxWidth: 168,
+            background: "rgba(0,0,0,0.55)",
+            color: "#fff",
+            padding: "2px 8px",
+            borderRadius: 6,
+            fontSize: 11,
+            fontWeight: 600,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            zIndex: 6,
+          }}
+        >
+          {selfDisplayName}
+        </div>
+      )}
 
       {/* コア②（検知キャプチャ）稼働バッジ: 実状態に連動。発火時にフラッシュ＋カウント。 */}
       <div

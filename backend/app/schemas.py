@@ -26,6 +26,9 @@ class CallTokenResponse(BaseModel):
     expires_at: datetime
     # Agora App ID（公開値）。フロントの SDK join に必要（契約変更①・M1）。
     app_id: str
+    # 相手（高齢者側デバイス）の表示名（家族が設定・nullable）。通話画面の
+    # Zoom 風ラベルに使う。未設定なら null（フロントはラベルを表示しない）。
+    remote_display_name: str | None = None
 
 
 class SpeechTokenResponse(BaseModel):
@@ -57,6 +60,10 @@ class IncomingStatus(BaseModel):
     incoming: bool
     call_id: UUID | None = None
     family_name: str | None = None
+    # 発信した家族メンバー自身が設定した表示名（call.caller_user_id → users.display_name）。
+    # 未設定・caller 不明は null。TV側の着信・通話ラベルで family_name より優先表示する（v0.7.0）。
+    # family_name は互換維持のためそのまま残す。
+    caller_display_name: str | None = None
 
 
 class AnswerResponse(BaseModel):
@@ -77,6 +84,49 @@ class DeviceRegisterRequest(BaseModel):
 
 class DeviceRegisterResponse(BaseModel):
     device_token: str
+
+
+class DeviceUpdateRequest(BaseModel):
+    """デバイス表示名の更新リクエスト（PATCH /devices/{device_id}）。
+
+    display_name は 30 文字までの表示名。空文字・空白のみは「未設定（null）」扱い。
+    """
+
+    display_name: str | None = Field(default=None, max_length=30)
+
+
+class DeviceInfo(BaseModel):
+    """自家族のデバイス情報（GET /devices・設定モーダルでの現在名表示用）。"""
+
+    device_id: UUID
+    display_name: str | None = None
+    status: str
+    registered_at: datetime | None = None
+
+
+class DeviceList(BaseModel):
+    items: list[DeviceInfo]
+
+
+# --- users（追加・v0.7.0）-----------------------------------------------------
+
+
+class UserUpdateRequest(BaseModel):
+    """自分の表示名の更新リクエスト（PATCH /users/me）。
+
+    display_name は 30 文字までの表示名。空文字・空白のみは「未設定（null）」扱い。
+    PATCH /devices/{device_id}（DeviceUpdateRequest）と同じ規則。
+    """
+
+    display_name: str | None = Field(default=None, max_length=30)
+
+
+class UserMe(BaseModel):
+    """自分（認証ユーザー）の情報（GET/PATCH /users/me）。"""
+
+    id: UUID
+    role: str
+    display_name: str | None = None
 
 
 # --- media --------------------------------------------------------------------
