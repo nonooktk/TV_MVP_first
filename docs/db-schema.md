@@ -4,7 +4,8 @@
 モデル実装: `backend/app/db/models.py`／マイグレーション: `0001_initial`
 （`backend/app/db/migrations/versions/0001_initial.py`）＋
 `0002_album_collage`（albums に `collage_storage_key` を追加）＋
-`0003_device_display_name`（devices に `display_name` を追加）。
+`0003_device_display_name`（devices に `display_name` を追加）＋
+`0004_user_display_name`（users に `display_name` を追加）。
 
 全テーブル共通: `id` = UUID v4 主キー、`created_at` = timestamptz（server_default `now()`）。
 
@@ -24,7 +25,7 @@
 | テーブル | 主要カラム |
 | --- | --- |
 | `families` | id, name, created_at |
-| `users` | id, family_id（FK→families）, role（`owner` / `viewer`）, auth_id（Entra ID・nullable・unique）, created_at |
+| `users` | id, family_id（FK→families）, role（`owner` / `viewer`）, auth_id（Entra ID・nullable・unique）, display_name（家族メンバー自身が設定する表示名・30字上限は API 側で担保・nullable）, created_at |
 | `devices` | id, family_id（FK→families）, fixed_contact_user_id（FK→users・固定通話相手）, status（`pending` / `active` / `revoked`・default `pending`）, display_name（家族が付ける表示名・通話画面のZoom風ラベル用・nullable）, registration_token_hash（初回登録リンクのトークンハッシュ・nullable）, registration_expires_at（nullable）, registered_at（nullable）, device_token_hash（待受認証用 X-Device-Token のハッシュ・nullable）, created_at |
 | `calls` | id, family_id（FK→families）, device_id（FK→devices）, caller_user_id（FK→users・nullable）, channel_name（通話ごとにローテーション）, status（`calling` / `active` / `ended`・default `calling`）, started_at（nullable）, ended_at（nullable）, created_at |
 | `memories` | id, call_id（FK→calls）, type（`photo` / `audio`）, storage_key（Blob参照）, score（float・nullable）, status（`candidate` / `selected`・default `candidate`）, captured_at, metadata（JSONB・default `{}`）, created_at |

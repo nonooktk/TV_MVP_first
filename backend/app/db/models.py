@@ -111,6 +111,10 @@ class User(Base):
     role: Mapped[str] = mapped_column(user_role_enum, nullable=False)
     # Entra ID の subject。招待前は未確定のため nullable。値がある場合は一意。
     auth_id: Mapped[str | None] = mapped_column(String, nullable=True, unique=True)
+    # 家族メンバー自身が設定する表示名。TV側の着信・通話ラベル（caller_display_name）や
+    # 家族通話画面の自分小窓ラベルに使う。未設定は null（フロントはフォールバック）。
+    # 30字上限は API 側（PATCH /users/me）で担保する。
+    display_name: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = _created_at()
 
     # リレーション
