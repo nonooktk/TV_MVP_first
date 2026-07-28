@@ -6,6 +6,8 @@
 - stt_labels の uniq（出現順保持）
 - trigger_reason の内訳集計（rms/stt/face の日本語化・未知値・欠落）
 - build_prompt の行省略（文脈あり/なし）と固定文言
+- タイトルの詩的文体（2026-07-28・S4）: 歌人ロール・文体指示・例示の存在と、
+  例示そのものが制約（15字以内・現代仮名遣い）を満たすこと
 - trigger_source（声トリガーの両側化・2026-07-10 追加）による has_family_trigger の判定と
   build_prompt への軽い反映（「家族側の反応」行）
 """
@@ -25,12 +27,16 @@ if str(_WORKER_ROOT) not in sys.path:
 from stages.call_context import (  # noqa: E402
     JST,
     STT_EXCERPT_MAX_CHARS,
+    TITLE_STYLE_EXAMPLES,
     CallContext,
     build_call_context,
     build_prompt,
     format_call_datetime,
     time_of_day_label,
 )
+
+# 旧仮名遣い（歴史的仮名遣い）で典型的に現れる字。プロンプトの例示に混ざっていないことを検証する。
+_OLD_KANA_CHARS = ("ゐ", "ヰ", "ゑ", "ヱ", "ゝ", "ゞ")
 
 
 def _jst(hour: int, minute: int = 0) -> datetime:
@@ -213,7 +219,7 @@ class TestBuildPrompt:
             trigger_summary="声の盛り上がり3回・感情ワード1回",
         )
         prompt = build_prompt(ctx)
-        assert "あなたは家族のフォトアルバムの編集者です。" in prompt
+        assert "あなたは歌人の趣を持つ、家族のフォトアルバムの編集者です。" in prompt
         assert "- 通話日時: 2026年7月4日・夕方" in prompt
         assert "- 会話から聞き取れた言葉（抜粋）: かわいいね／また来てね" in prompt
         assert "- 検知した感情ワード: かわいい" in prompt
@@ -262,3 +268,112 @@ class TestBuildPrompt:
         ctx = CallContext(datetime_label="2026年7月4日・夜", has_family_trigger=False)
         prompt = build_prompt(ctx)
         assert "家族側の反応" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# タイトルの詩的文体（2026-07-28・S4）
+# ---------------------------------------------------------------------------
+
+
+class TestPoeticTitleStyle:
+    """タイトルを詩的文体にする指示・例示がプロンプトへ確実に入ることを検証する。
+
+    文脈の有無に関わらず常に入る（文脈行のように省略されない）ことが要点。
+    """
+
+    @staticmethod
+    def _prompts() -> list[str]:
+        """文脈なし・文脈ありの両方のプロンプトを返す（常設の指示ブロックを検証するため）。"""
+        minimal = CallContext(datetime_label="2026年7月4日・夜")
+        full = CallContext(
+            datetime_label="2026年7月4日・夕方",
+            stt_excerpt="朝顔きれいね",
+            stt_labels=("うれしい",),
+            trigger_summary="声の盛り上がり2回",
+            has_family_trigger=True,
+            has_face_trigger=True,
+            has_family_stream=True,
+        )
+        return [build_prompt(minimal), build_prompt(full)]
+
+    def test_role_is_poet_editor(self):
+        """ロールが「歌人の趣を持つ、家族のフォトアルバムの編集者」であること。"""
+        for prompt in self._prompts():
+            assert "あなたは歌人の趣を持つ、家族のフォトアルバムの編集者です。" in prompt
+
+    def test_classical_poetry_style_instructions_present(self):
+        """古典詩歌の情緒・季節の気配・余韻・体言止め・大和言葉の指示が入る。"""
+        for prompt in self._prompts():
+            assert "タイトルの文体:" in prompt
+            assert "古典詩歌（和歌・俳句）の情緒" in prompt
+            assert "季節の気配" in prompt
+            assert "余韻" in prompt
+            assert "体言止め" in prompt
+            assert "大和言葉" in prompt
+
+    def test_modern_kana_is_required(self):
+        """旧仮名遣いを使わせない指示が入る（読みやすさ優先）。
+
+        「ゐ・ゑ」型だけでなく「思ひ出」型（語中のハ行）も具体例で潰していること
+        （S4 の実生成で「卓袱台に咲く思ひ出」が出たため補強した）。
+        """
+        for prompt in self._prompts():
+            assert "旧仮名遣い（ゐ・ゑ・けふ・思ひ出 など）は使わず、現代仮名遣いで" in prompt
+            assert "「思ひ出」ではなく「思い出」" in prompt
+
+    def test_length_limit_restated_in_style_block(self):
+        """詩情を優先しても15字以内を守らせる念押しが入る。"""
+        for prompt in self._prompts():
+            assert "15字以内は必ず守る" in prompt
+
+    def test_no_hallucination_guard_in_style_block(self):
+        """季節・場面を勝手に決めつけさせないガード行が入る。"""
+        for prompt in self._prompts():
+            assert "分かる範囲にとどめ、無い情報を決めつけない" in prompt
+
+    def test_examples_are_embedded_in_prompt(self):
+        """例示（3〜5個）がすべてプロンプトへ箇条書きで埋め込まれる。"""
+        assert 3 <= len(TITLE_STYLE_EXAMPLES) <= 5
+        for prompt in self._prompts():
+            assert "タイトルの例" in prompt
+            for example in TITLE_STYLE_EXAMPLES:
+                assert f"- {example}" in prompt
+
+    def test_examples_satisfy_title_constraints(self):
+        """例示自体が制約（15字以内・現代仮名遣い）を満たす＝見本が破綻していないこと。"""
+        for example in TITLE_STYLE_EXAMPLES:
+            assert 0 < len(example) <= 15, example
+            for char in _OLD_KANA_CHARS:
+                assert char not in example, example
+
+    def test_examples_are_not_to_be_copied_verbatim(self):
+        """例示の丸写しを禁じる一文が入る（毎回同じタイトルになるのを防ぐガード）。"""
+        for prompt in self._prompts():
+            assert "そのまま使わず" in prompt
+
+    def test_caption_stays_plain(self):
+        """キャプションは平易なまま（詩的にしすぎない）という指示であること。"""
+        for prompt in self._prompts():
+            assert (
+                "- キャプションは30字以内。写真から分かる表情・場面を、"
+                "詩的にしすぎず平易な言葉で伝える" in prompt
+            )
+
+    def test_caption_forbids_classical_style(self):
+        """キャプションは完全に口語（文語調を使わせない）指示が入ること。
+
+        タイトルの詩的文体がキャプションへ滲むのを防ぐ念押し（S4 コーディネーター裁定）。
+        """
+        for prompt in self._prompts():
+            assert (
+                "- キャプションでは文語調（〜き・〜なり 等）は使わず、"
+                "話し言葉に近い平易な文にする" in prompt
+            )
+
+    def test_unchanged_contract_is_kept(self):
+        """変更禁止の制約（15字/30字・固有名詞・JSON のみ）が維持されていること。"""
+        for prompt in self._prompts():
+            assert "- タイトルは15字以内。「家族の◯◯」のような汎用表現を避け" in prompt
+            assert "- キャプションは30字以内。" in prompt
+            assert "- 固有名詞は推測しない" in prompt
+            assert '- JSON {"title": "...", "caption": "..."} のみを返す' in prompt

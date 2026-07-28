@@ -664,7 +664,7 @@ function CallPageInner() {
         <div style={overlayStyle}>
           <div style={{ fontSize: 18, fontWeight: 700 }}>接続中…</div>
           <p style={{ fontSize: 13, color: "#bbb" }}>
-            相手が「でる」を押すと映像がつながります
+            お相手が「でる」を押すと映像がつながります
           </p>
         </div>
       )}

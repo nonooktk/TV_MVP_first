@@ -11,6 +11,9 @@
   渡して、この通話ならではのタイトル・キャプションを日本語で生成し、API 呼び出しが
   失敗した場合は定型フォールバックへ委譲する（挙動は共通・接続先だけが異なる）。
   応答は JSON {"title","caption"} を第一とし、失敗時のみ従来形式を緩くパースする。
+  パース後は保存前に字数上限（タイトル15字・キャプション30字）を強制する
+  （_enforce_limit。プロンプトの指示だけでは守られないため。2026-07-28・S4）。
+  超過したフィールドは切り詰めず、そのフィールドだけ定型フォールバック値を採る。
   - AzureOpenAILabelProvider: Azure OpenAI 版（Regional Standard。本番はこちら）
   - OpenAILabelProvider:      直 OpenAI API 版（MVP 期間中の暫定。支給キーを利用）
 
@@ -46,6 +49,13 @@ _DEFAULT_API_VERSION = "2024-08-01-preview"
 _DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 # vision に渡す最大枚数（コスト・レイテンシ配慮。5枚選択のうち先頭数枚）。
 _MAX_VISION_IMAGES = 3
+
+# 生成結果の上限文字数。stages/call_context.py の build_prompt が指示する上限と一致させる。
+# プロンプトはあくまで「お願い」でありモデルは超過しうるため、保存前にここで強制する
+# （2026-07-28・S4。タイトルを詩的文体にした改修で字数超過のリスクが上がったため追加）。
+# 超過時は切り詰めずフォールバック定型文を採る（_enforce_limit の docstring 参照）。
+TITLE_MAX_CHARS = 15
+CAPTION_MAX_CHARS = 30
 
 
 @dataclass(frozen=True)
@@ -148,6 +158,28 @@ def _parse_labels(text: str) -> tuple[str, str]:
     return title, caption
 
 
+def _enforce_limit(text: str, limit: int, field: str, fallback_value: str) -> str:
+    """上限文字数以内ならそのまま返し、超過したら定型フォールバック値へ差し替える。
+
+    切り詰め（先頭N字を採る）は行わない。日本語は語中で切ると壊れた文になり
+    （例: 「笑みこぼるる夕べの茶の間のひと」）、詩的タイトルでは特に目立つため、
+    「壊れた15字」より「整った定型文」を採る方針とする（S4-M1・クロミ QA 指摘）。
+    切り詰めが無いので、結合文字・絵文字などの書記素境界を割る問題も構造的に起きない。
+
+    ログには生成テキスト本文を含めず、字数のみを記録する
+    （会話由来のテキストを worker のログへ流出させないため。クロミ Minor 指摘）。
+    """
+    if len(text) <= limit:
+        return text
+    logger.warning(
+        "%sが上限%d字を超過（実測%d字）のためフォールバックを採用",
+        field,
+        limit,
+        len(text),
+    )
+    return fallback_value
+
+
 class _VisionLabelProviderBase:
     """vision チャット補完でタイトル・キャプションを生成する共通実装。
 
@@ -214,8 +246,16 @@ class _VisionLabelProviderBase:
             if parsed is None:
                 parsed = _parse_labels(text)
             title, caption = parsed
+            # 上限強制はパース経路の合流点で一度だけ行う（JSON／緩いパースの双方に効く）。
+            title = title.strip()
+            caption = caption.strip()
             if not title:
                 return fallback
+            # 上限超過はフィールド単位で定型へ差し替える（片方だけ超過なら他方は生成値を活かす）。
+            title = _enforce_limit(title, TITLE_MAX_CHARS, "タイトル", fallback.title)
+            caption = _enforce_limit(
+                caption, CAPTION_MAX_CHARS, "キャプション", fallback.caption
+            )
             return Labels(
                 title=title,
                 caption=caption or fallback.caption,

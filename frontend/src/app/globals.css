@@ -45,8 +45,13 @@
   --radius-lg: 6px;
   --radius-md: 4px;
   --radius-pill: 999px;
+  /* S4: 書体を明朝へ全面統一した（家族側・高齢者側とも）。
+     --font-display と --font-body は同じスタックだが、役割の違いを CSS 上で読み取れるよう
+     名前は分けたまま残す（見出し＝display / 本文＝body）。 */
   --font-display: var(--font-zen-old-mincho), "Hiragino Mincho ProN", "Yu Mincho", serif;
-  --font-body: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo",
+  --font-body: var(--font-zen-old-mincho), "Hiragino Mincho ProN", "Yu Mincho", serif;
+  /* システムゴシック。等幅数字（tabular-nums）が要る箇所など、明朝で成立しない用途の退避先。 */
+  --font-gothic: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo",
     -apple-system, BlinkMacSystemFont, sans-serif;
   /* 和紙の紙目（S2 から維持。画像なし・非常に淡く。コントラストは最暗セル基準で担保する） */
   --washi-texture:
@@ -99,6 +104,11 @@ body {
   background: var(--color-desk);
   color: var(--color-text);
   font-family: var(--font-body);
+  /* S4: 本文・説明文は 400。ボタン・強調は 700 で対比をつける。
+     一度 500 を基準にしたが、フォント CSS（描画ブロッキング）が gzip +30KB 増えて
+     初回表示を損なうため 400/700 の 2 ウェイト構成に戻した（.elder-date / .elder-status も
+     明示指定を持たないためここから 400 を継承する）。 */
+  font-weight: 400;
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
 }
@@ -217,7 +227,7 @@ h3 {
   width: 100%;
   padding: 14px;
   font-size: 15px;
-  font-weight: 600;
+  font-weight: 700;
   letter-spacing: 0.04em;
   color: var(--color-text);
   background: var(--color-surface);
@@ -444,6 +454,15 @@ h3 {
    中央の合わせ目で趣を作る。数字は機械が示す事実＝ゴシック＋等幅数字。 */
 .elder-clock {
   display: inline-block;
+  /* S4 の例外: 時計だけは明朝にせずゴシックを残す。
+     Zen Old Mincho は tabular-nums（tnum）を持たず、指定しても等幅にならない
+     （実測: font-variant-numeric の有無で桁幅が完全に同じ＝機能が無い）。
+     明朝の数字はプロポーショナルで桁幅が 50.6〜58.8px とばらつき、時刻文字列の幅が
+     最大 32.68px 振れる（11:11=232.9px / 00:00=265.58px）。この要素は板面（背景）を
+     持つため、幅が変わると**毎分パタパタ時計の板ごと横幅が動く**。
+     ゴシックなら全桁が同幅（実測: 桁幅の差 0・時刻文字列の幅の差 0）で板が静止する。
+     ＝「機械が示す数字」という S2 からの設計意図（等幅必須）を満たすため、ここだけ例外とする。 */
+  font-family: var(--font-gothic);
   font-size: 10vw; /* 既定値。standby はインラインで 6.5vw に上書きされる＝現状維持 */
   font-weight: 700;
   letter-spacing: 0.06em;
@@ -475,6 +494,9 @@ h3 {
 .elder-status {
   margin-top: 24px;
   font-size: 2.4vw; /* standby はインライン 1.6vw ＝現状維持 */
+  /* S4 QA: 高齢者側で最小の 1.6vw（standby のインライン指定）は明朝 400 の白抜きだと
+     遠見で細く沈むため 700 にする。700 は既にロード済みのウェイトなので転送量は増えない。 */
+  font-weight: 700;
   letter-spacing: 0.08em;
   color: var(--elder-status);
 }
@@ -559,6 +581,9 @@ h3 {
 .btn-hangup {
   padding: 10px 28px;
   font-size: 1.6vw; /* 現状維持 */
+  /* S4 QA: 高齢者側で最小の 1.6vw。明朝 400 の白抜きだと遠見で細く沈むため 700 にする
+     （700 はロード済みウェイト＝転送量の増分なし。サイズ・色・寸法は変更しない）。 */
+  font-weight: 700;
   border-radius: var(--radius-pill);
   background: rgba(0, 0, 0, 0.45);
   color: var(--elder-text);
@@ -621,7 +646,7 @@ h3 {
   flex: 1;
   padding: 8px 0;
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 700;
   letter-spacing: 0.06em;
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-md);
