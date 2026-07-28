@@ -419,7 +419,10 @@ function HomePageInner() {
       {/* 見出し要素は残し、中身だけをロゴ画像にする（h1 の階層・順序は不変。
           アクセシブルな名前は alt が担うため読み上げは「見出しレベル1: おもひでてれび」）。
           ロゴ横にテキストのワードマークは併置しない（ロゴ自体に社名が含まれるため）。 */}
-      <h1 style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>
+      {/* リード文（「通話するとAIが感動の瞬間を…」）は統括判断により削除した（2026-07-28 S4）。
+          ロゴ直下の余白は、削除した p の marginBottom(20) を h1 側へ移して従来の間隔を保つ
+          （4 → 24）。他要素の配置・余白は変更していない。 */}
+      <h1 style={{ fontSize: 22, fontWeight: 700, marginBottom: 24 }}>
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           className="brand-logo"
@@ -429,9 +432,6 @@ function HomePageInner() {
           height={453}
         />
       </h1>
-      <p style={{ color: "var(--color-text-muted)", fontSize: 13, marginTop: 0, marginBottom: 20 }}>
-        通話するとAIが感動の瞬間を自動でキャプチャします
-      </p>
 
       {showNewBanner && (
         <div className="banner">
