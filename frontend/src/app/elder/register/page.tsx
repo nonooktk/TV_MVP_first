@@ -63,7 +63,7 @@ function ElderRegisterPageInner() {
     <div className="elder-shell">
       <div style={{ fontSize: "6vw", fontWeight: 700 }}>{message}</div>
       {status === "error" && (
-        <div style={{ marginTop: 24, fontSize: "2.5vw", color: "#ffb0a0" }}>
+        <div style={{ marginTop: 24, fontSize: "2.5vw", color: "var(--elder-alert)" }}>
           かぞくの かたに れんらくして、もう いちど リンクを もらってください
         </div>
       )}

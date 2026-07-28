@@ -343,7 +343,7 @@ export default function ElderStandbyPage() {
         <div style={{ fontSize: "4vw", fontWeight: 700 }}>
           まだ とうろく されていません
         </div>
-        <div style={{ marginTop: 20, fontSize: "2.2vw", color: "#cfe0ea" }}>
+        <div style={{ marginTop: 20, fontSize: "2.2vw", color: "var(--elder-text-sub)" }}>
           かぞくの かたから もらった リンクを ひらいてください
         </div>
       </div>

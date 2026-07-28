@@ -7,6 +7,7 @@
 // - いずれか有効: 初期化してサインイン状態を確認し、
 //     未サインイン → 選択式サインイン画面（有効なプロバイダのボタンのみ表示）
 //                    ・Google=GIS 公式ボタン ・Microsoft=既存 MSAL ボタン
+//                      （※ Microsoft ボタンは 2026-07-28 より非表示。SHOW_ENTRA_SIGNIN 参照）
 //     サインイン済み → children を描画する。
 //
 // サインイン判定は「Google の ID トークン保持」または「Entra のアカウント有無」のいずれか。
@@ -15,6 +16,7 @@
 // 高齢者側（/elder/*）はこのゲートを使わない（認証SDKを読み込まない）。
 
 import { useEffect, useRef, useState } from "react";
+import BrandLoader from "./BrandLoader";
 import {
   clearMsalInteractionState,
   formatAuthError,
@@ -29,8 +31,32 @@ import {
   isGoogleSignedIn,
   renderGoogleButton,
 } from "../lib/googleAuth";
+import { ENTRA_AUTH_ENABLED } from "../lib/auth-flags";
 
 type GateState = "checking" | "signed_out" | "signed_in";
+
+// Microsoft（Entra ID）サインインボタンの表示フラグ。
+//
+// 認証の可否そのものは共有フラグ lib/auth-flags.ts の ENTRA_AUTH_ENABLED が持つ
+// （リリース前 悲観QA B-1 の是正。表示層だけ隠しても認証解決層が生きていると
+//  MSAL キャッシュを持つ既存利用者が壊れた Microsoft サインインへ飛ばされ続けるため）。
+//
+// ※ ここで共有フラグを直接参照せず false リテラルを置いているのは意図的。
+//    import 経由の定数はモジュールを跨ぐため minifier が畳み込めず、Microsoft ボタンの
+//    JSX が配信バンドルに残る（「Microsoft でサインイン」「microsoft-signin-button」が
+//    チャンクに出力されることを実測で確認）。同一モジュール内の false リテラルなら
+//    ビルド時に枝ごと除去される。
+//    実行時の値は下の型アサーションで共有フラグと一致することが保証される。
+// ※ 条件式では必ずこの定数を先頭に置くこと（`SHOW_ENTRA_SIGNIN && ...`）。
+const SHOW_ENTRA_SIGNIN = false;
+
+// 表示フラグと共有フラグの食い違いを型レベルで防ぐ。
+// auth-flags.ts の ENTRA_AUTH_ENABLED を true に戻すと、この行が
+// 「Type 'false' is not assignable to type 'true'」で tsc エラーになる。
+// ＝コンパイラが「表示側の SHOW_ENTRA_SIGNIN も true にせよ」と必ず教えるため、
+//   認証だけ復活してボタンが出ない（またはその逆）状態のまま出荷されることはない。
+const entraFlagsInSync: typeof ENTRA_AUTH_ENABLED = SHOW_ENTRA_SIGNIN;
+void entraFlagsInSync;
 
 export default function FamilyAuthGate({ children }: { children: React.ReactNode }) {
   const googleEnabled = isGoogleEnabled();
@@ -46,6 +72,8 @@ export default function FamilyAuthGate({ children }: { children: React.ReactNode
   const [authError, setAuthError] = useState<string | null>(null);
   // GIS 公式ボタンの描画先。
   const googleBtnRef = useRef<HTMLDivElement | null>(null);
+  // GIS スクリプトに到達できずボタンを描画できなかった（悲観QA M-1）。
+  const [googleLoadFailed, setGoogleLoadFailed] = useState(false);
 
   // 初期化＋サインイン状態の判定（Entra 有効時のみ MSAL を初期化する）。
   useEffect(() => {
@@ -97,8 +125,15 @@ export default function FamilyAuthGate({ children }: { children: React.ReactNode
     void renderGoogleButton(googleBtnRef.current, () => {
       // ID トークン取得後にサインイン完了。
       if (!cancelled) setState("signed_in");
-    }).catch(() => {
-      // GIS ロード失敗時はボタンが出ないだけ（Microsoft があればそちらで続行可能）。
+    }).catch((e) => {
+      // GIS（accounts.google.com）に到達できないとボタンが描画されない。
+      // Microsoft ボタンを出さなくなった今、握りつぶすと「押せる要素ゼロ・エラーゼロ」の
+      // 行き止まり画面になる（リリース前 悲観QA M-1）。原因が分かる文言を必ず出す。
+      // 到達条件: 広告ブロッカー・企業プロキシ・GIS 障害・オフライン。
+      console.error("[FamilyAuthGate] Google サインインボタンの初期化に失敗:", e);
+      if (!cancelled) {
+        setGoogleLoadFailed(true);
+      }
     });
     return () => {
       cancelled = true;
@@ -145,7 +180,10 @@ export default function FamilyAuthGate({ children }: { children: React.ReactNode
         className="family-shell"
         style={{ display: "flex", alignItems: "center", justifyContent: "center" }}
       >
-        <p style={{ color: "var(--color-text-muted)" }}>読み込み中…</p>
+        {/* 起動時の表示はここが担う（FamilyAuthGate が家族側 4 ページをすべてラップするため、
+            起動直後は必ずここを通る）。状態変数 state は変更していない＝消滅条件は従来どおり
+            state !== "checking" になったとき。 */}
+        <BrandLoader />
       </div>
     );
   }
@@ -164,9 +202,17 @@ export default function FamilyAuthGate({ children }: { children: React.ReactNode
       }}
     >
       <div className="card" style={{ width: "100%", maxWidth: 360, padding: 28 }}>
-        <div style={{ fontSize: 40, marginBottom: 8 }}>📞</div>
+        {/* S3: 直前にあった 📞 の div は削除した（カラー絵文字はモノクロ方針と相反し、
+            その役割はロゴが担うため。テスト用の識別属性は付いていなかった）。 */}
         <h1 style={{ fontSize: 22, fontWeight: 700, margin: "0 0 4px" }}>
-          元気にしてる？
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            className="brand-logo"
+            src="/brand/logo.png"
+            alt="おもひでてれび"
+            width={480}
+            height={453}
+          />
         </h1>
         <p
           style={{
@@ -199,8 +245,40 @@ export default function FamilyAuthGate({ children }: { children: React.ReactNode
             />
           )}
 
-          {/* Google と Microsoft の両方が有効なときは区切りを入れる。 */}
-          {googleEnabled && entraEnabled && (
+          {/* GIS に到達できずボタンを描画できなかったときの診断と復帰手段（悲観QA M-1）。
+              これが無いと「押せる要素ゼロ・エラーゼロ」の行き止まり画面になる。 */}
+          {googleEnabled && googleLoadFailed && (
+            <div
+              data-testid="google-load-error"
+              style={{
+                width: "100%",
+                fontSize: 13,
+                lineHeight: 1.6,
+                color: "var(--color-danger)",
+                background: "var(--color-tint-primary)",
+                border: "1px solid var(--color-danger)",
+                borderRadius: 8,
+                padding: "10px 12px",
+                textAlign: "left",
+              }}
+            >
+              サインインの準備に失敗しました。
+              <br />
+              通信環境（オフライン・広告ブロッカー・社内プロキシ）をご確認のうえ、
+              もういちどお試しください。
+              <button
+                className="btn-secondary"
+                style={{ marginTop: 10 }}
+                onClick={() => window.location.reload()}
+              >
+                再読み込み
+              </button>
+            </div>
+          )}
+
+          {/* Google と Microsoft の両方が有効なときは区切りを入れる。
+              SHOW_ENTRA_SIGNIN=false の間はこの枝ごとビルドから除去される。 */}
+          {SHOW_ENTRA_SIGNIN && googleEnabled && entraEnabled && (
             <div
               style={{
                 display: "flex",
@@ -217,8 +295,9 @@ export default function FamilyAuthGate({ children }: { children: React.ReactNode
             </div>
           )}
 
-          {/* Microsoft: 既存 MSAL（リダイレクト方式）。 */}
-          {entraEnabled && (
+          {/* Microsoft: 既存 MSAL（リダイレクト方式）。
+              SHOW_ENTRA_SIGNIN=false の間は非表示（ロジックは温存・上記の定数コメント参照）。 */}
+          {SHOW_ENTRA_SIGNIN && entraEnabled && (
             <button
               className="btn-primary"
               data-testid="microsoft-signin-button"
@@ -238,9 +317,12 @@ export default function FamilyAuthGate({ children }: { children: React.ReactNode
             style={{
               fontSize: 12,
               lineHeight: 1.5,
-              color: "var(--color-danger, #c0392b)",
-              background: "var(--color-danger-bg, #fdecea)",
-              border: "1px solid var(--color-danger, #c0392b)",
+              // S3: 面はモノクロの淡墨のにじみにし、朱は文字と枠線だけに使う
+              // （--color-danger-bg は未定義でハードコードの淡桃 #fdecea が描画されていた）。
+              // 朱文字は淡墨のにじみ面に対し 8.15:1。
+              color: "var(--color-danger)",
+              background: "var(--color-tint-primary)",
+              border: "1px solid var(--color-danger)",
               borderRadius: 8,
               padding: "10px 12px",
               marginTop: 20,
@@ -264,11 +346,15 @@ export default function FamilyAuthGate({ children }: { children: React.ReactNode
             marginBottom: 0,
           }}
         >
-          {googleEnabled && entraEnabled
-            ? "Google アカウント、または Microsoft アカウント（Outlook / Hotmail など）でご利用いただけます。"
-            : googleEnabled
-            ? "お持ちの Google アカウントでご利用いただけます。"
-            : "お持ちの Microsoft アカウント（Outlook / Hotmail など）でご利用いただけます。"}
+          {/* SHOW_ENTRA_SIGNIN=false の間は Google のみの文言に固定する。
+              三項の外側にフラグを置くことで、Microsoft を含む文言はビルドから除去される。 */}
+          {SHOW_ENTRA_SIGNIN
+            ? googleEnabled && entraEnabled
+              ? "Google アカウント、または Microsoft アカウント（Outlook / Hotmail など）でご利用いただけます。"
+              : googleEnabled
+              ? "お持ちの Google アカウントでご利用いただけます。"
+              : "お持ちの Microsoft アカウント（Outlook / Hotmail など）でご利用いただけます。"
+            : "お持ちの Google アカウントでご利用いただけます。"}
         </p>
       </div>
     </div>

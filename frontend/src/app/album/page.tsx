@@ -29,6 +29,7 @@ import {
 import BackHeader from "../../components/BackHeader";
 import ThumbImage from "../../components/ThumbImage";
 import FamilyAuthGate from "../../components/FamilyAuthGate";
+import BrandLoader from "../../components/BrandLoader";
 
 const POLL_INTERVAL_MS = 5000; // generating があるときの一覧ポーリング間隔
 
@@ -40,8 +41,10 @@ const POLL_INTERVAL_MS = 5000; // generating があるときの一覧ポーリ�
 function albumStreamBadge(
   stream?: "elder" | "family" | null
 ): { label: string; color: string } | null {
-  if (stream === "family") return { label: "孫", color: "#e8734a" };
-  if (stream === "elder") return { label: "祖父母", color: "#4a7ae8" };
+  // S3: モノクロ化により濃墨／淡墨の濃淡差に変更（白文字で 16.31:1 / 5.98:1）。
+  // 識別は「孫」「祖父母」のラベル文言が担うため、濃淡差は補助にとどめる（WCAG 1.4.1）。
+  if (stream === "family") return { label: "孫", color: "#241f1c" };
+  if (stream === "elder") return { label: "祖父母", color: "#6e6157" };
   return null;
 }
 
@@ -157,7 +160,7 @@ function AlbumPageInner() {
       <BackHeader />
       <h1 style={{ fontSize: 20 }}>アルバム</h1>
 
-      {loading && <p>読み込み中…</p>}
+      {loading && <BrandLoader />}
       {error && <p style={{ color: "var(--color-danger)" }}>{error}</p>}
 
       {!loading && !error && albums.length === 0 && (
@@ -175,7 +178,10 @@ function AlbumPageInner() {
       {!loading &&
         grouped.map(([dateLabel, albumsOfDate]) => (
           <section key={dateLabel} style={{ marginBottom: 28 }}>
-            <h2 style={{ fontSize: 15, color: "var(--color-text-muted)", marginBottom: 8 }}>
+            {/* 色は帳面の日付インデックス＝中墨（S3 §6-4）。この見出しは .card の外＝
+                画面地の上に直接置かれるため、和紙最暗セルでも 6.53:1 を満たす --sumi-600 を使う。
+                globals.css 側の .family-shell > section:not(.card) > h2 と同じ値。 */}
+            <h2 style={{ fontSize: 15, color: "var(--sumi-600)", marginBottom: 8 }}>
               {dateLabel}
             </h2>
             {albumsOfDate.map((album) => (
@@ -369,7 +375,8 @@ function ReadyAlbumBody({
         <video
           src={album.video_sas_url}
           controls
-          style={{ width: "100%", borderRadius: 10, background: "#000", marginBottom: 10 }}
+          // 角丸はカード（--radius-lg 6px）に合わせた額縁の作法に揃える
+          style={{ width: "100%", borderRadius: 4, background: "#000", marginBottom: 10 }}
         />
       )}
 
@@ -382,7 +389,8 @@ function ReadyAlbumBody({
           onClick={() => onCollageClick(album.collage_sas_url!)}
           style={{
             width: "100%",
-            borderRadius: 10,
+            // 角丸はカード（--radius-lg 6px）に合わせた額縁の作法に揃える
+            borderRadius: 4,
             marginBottom: 10,
             cursor: "pointer",
             display: "block",
@@ -414,7 +422,8 @@ function ReadyAlbumBody({
                     height: 64,
                     objectFit: "cover",
                     borderRadius: 8,
-                    border: "2px solid #fff",
+                    // 白ではなく白練（印画紙の縁）で囲む
+                    border: "3px solid var(--color-surface)",
                     boxShadow: "0 1px 4px rgba(0,0,0,0.25)",
                     cursor: "pointer",
                     display: "block",

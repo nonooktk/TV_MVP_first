@@ -1,5 +1,9 @@
 // 家族側ログイン（Entra ID 本実装・内製C5）
 //
+// ※ 2026-07-28: Entra ログインが利用不能のため、lib/auth-flags.ts の
+//   ENTRA_AUTH_ENABLED = false により、env の設定によらず本モジュールの機能は
+//   すべて無効化されている（isEntraEnabled() が常に false）。理由と再開手順は同ファイル参照。
+//
 // 二段構え:
 // - NEXT_PUBLIC_ENTRA_CLIENT_ID が空（アプリ登録未作成）なら Entra は「無効」。
 //   ログイン UI は出さず、api-client は従来どおり dev 固定トークン（auth-stub.ts）で動く。
@@ -17,6 +21,7 @@ import type {
   AuthenticationResult,
   IPublicClientApplication,
 } from "@azure/msal-browser";
+import { ENTRA_AUTH_ENABLED } from "./auth-flags";
 
 // アプリ登録の「アプリケーション（クライアント）ID」。ビルド時に注入する。
 // 空文字なら Entra 無効（＝二段構えの dev トークン動作）。
@@ -30,8 +35,17 @@ const CLIENT_ID = process.env.NEXT_PUBLIC_ENTRA_CLIENT_ID ?? "";
 const AUTHORITY =
   process.env.NEXT_PUBLIC_ENTRA_AUTHORITY || "https://login.microsoftonline.com/common";
 
-/** Entra が有効か（クライアントID が設定されているか）。 */
+/**
+ * Entra が有効か（コード側フラグ ＋ クライアントID の両方が揃っているか）。
+ *
+ * ENTRA_AUTH_ENABLED を先に評価するのが要点。false の間は env にクライアントID が
+ * 焼き込まれていても常に false を返し、initAuth / getAccount / login / logout /
+ * getApiAccessToken / isSignedIn がすべて早期 return する
+ * ＝ MSAL の初期化もリダイレクト発行も一切起きない（リリース前 悲観QA B-1 の是正）。
+ * 理由と再開手順は lib/auth-flags.ts に記載。
+ */
 export function isEntraEnabled(): boolean {
+  if (!ENTRA_AUTH_ENABLED) return false;
   return CLIENT_ID.trim().length > 0;
 }
 
