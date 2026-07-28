@@ -3,6 +3,7 @@
 - LABEL_PROVIDER による明示指定（openai / azure / fallback・不正値・必須env欠落）
 - 未指定時の自動判定の優先順（openai 優先 → azure → fallback。MVP 暫定方針）
 - vision 版 generate の共通挙動（画像なし→定型／API失敗→定型／成功時のパース）
+- 生成後の字数上限強制（タイトル15字・キャプション30字。超過時は定型へ差し替え。2026-07-28・S4）
 
 実 API キー・実 API 呼び出しは使わない（クライアント生成をモックする）。
 """
@@ -10,6 +11,7 @@
 from __future__ import annotations
 
 import sys
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,6 +23,8 @@ if str(_WORKER_ROOT) not in sys.path:
 
 from stages.call_context import CallContext  # noqa: E402
 from stages.labels import (  # noqa: E402
+    CAPTION_MAX_CHARS,
+    TITLE_MAX_CHARS,
     AzureOpenAILabelProvider,
     FallbackLabelProvider,
     OpenAILabelProvider,
@@ -314,3 +318,266 @@ class TestVisionGenerate:
         assert "- 通話日時: 2026年7月4日・夜" in prompt
         assert "会話から聞き取れた言葉" not in prompt
         assert "撮影のきっかけ" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# 生成後の字数上限強制（2026-07-28・S4）
+# ---------------------------------------------------------------------------
+
+
+class TestLengthLimit:
+    """モデルが上限を超えて返したとき、そのフィールドを定型へ差し替えることを検証する。
+
+    プロンプトの「15字以内」はお願いに過ぎず守られない場合があるため、
+    OpenAI／Azure 共通のパース経路で上限を強制する（詩的文体化で超過リスクが上がった）。
+    切り詰めは行わない（語中で切ると壊れた日本語になるため。S4-M1・クロミ QA 指摘）。
+    """
+
+    def _photo(self, tmp_path: Path) -> Path:
+        p = tmp_path / "photo-1.jpg"
+        p.write_bytes(b"\xff\xd8\xff\xe0dummy-jpeg")
+        return p
+
+    def _generate(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        text: str,
+        *,
+        azure: bool = False,
+    ):
+        """フェイク応答 text を返させて generate の結果を得る。"""
+        if azure:
+            provider = AzureOpenAILabelProvider(
+                endpoint="https://example.openai.azure.com/",
+                api_key="azure-test-key",
+                deployment="gpt-4o",
+            )
+            model = "gpt-4o"
+        else:
+            provider = OpenAILabelProvider(api_key="sk-test")
+            model = "gpt-4o-mini"
+        fake = _FakeChatClient(text=text)
+        monkeypatch.setattr(provider, "_create_client", lambda: (fake, model))
+        return provider.generate(_CALL_DATE, 5, photo_paths=[self._photo(tmp_path)])
+
+    def test_title_exactly_at_limit_is_kept(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """境界: ちょうど15字のタイトルは生成値をそのまま採用する。"""
+        title = "あ" * TITLE_MAX_CHARS
+        labels = self._generate(
+            monkeypatch, tmp_path, f'{{"title": "{title}", "caption": "c"}}'
+        )
+        assert labels.title == title
+        assert len(labels.title) == TITLE_MAX_CHARS
+
+    def test_title_over_limit_uses_fallback_title(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """境界: 16字のタイトルは切り詰めず定型タイトルへ差し替える。"""
+        title = "あ" * (TITLE_MAX_CHARS + 1)
+        labels = self._generate(
+            monkeypatch, tmp_path, f'{{"title": "{title}", "caption": "c"}}'
+        )
+        assert labels.title == "2026年7月4日の思い出"
+        # 生成値の断片が混ざらない（＝切り詰めていない）こと。
+        assert "あ" not in labels.title
+
+    def test_over_limit_title_is_not_truncated_midword(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """S4-M1 回帰: 詩的タイトルが語中で切れた壊れた日本語にならないこと。
+
+        実測で出た「笑みこぼるる夕べの茶の間のひととき」(18字) を入力し、
+        旧方式の切り詰め結果「笑みこぼるる夕べの茶の間のひと」(15字) にならないことを見る。
+        """
+        title = "笑みこぼるる夕べの茶の間のひととき"
+        assert len(title) > TITLE_MAX_CHARS  # 前提の確認
+        labels = self._generate(
+            monkeypatch, tmp_path, f'{{"title": "{title}", "caption": "c"}}'
+        )
+        assert labels.title == "2026年7月4日の思い出"
+        assert labels.title != title[:TITLE_MAX_CHARS]
+
+    def test_caption_exactly_at_limit_is_kept(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """境界: ちょうど30字のキャプションは生成値をそのまま採用する。"""
+        caption = "い" * CAPTION_MAX_CHARS
+        labels = self._generate(
+            monkeypatch, tmp_path, f'{{"title": "t", "caption": "{caption}"}}'
+        )
+        assert labels.caption == caption
+        assert len(labels.caption) == CAPTION_MAX_CHARS
+
+    def test_caption_over_limit_uses_fallback_caption(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """境界: 31字のキャプションは切り詰めず定型キャプションへ差し替える。"""
+        caption = "い" * (CAPTION_MAX_CHARS + 1)
+        labels = self._generate(
+            monkeypatch, tmp_path, f'{{"title": "t", "caption": "{caption}"}}'
+        )
+        assert labels.caption == "5枚のベストショット"
+        assert "い" not in labels.caption
+
+    def test_only_over_limit_field_is_replaced(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """片方だけ超過した場合、もう片方の生成値は活かす（フィールド独立）。"""
+        long_title = "あ" * (TITLE_MAX_CHARS + 5)
+        labels = self._generate(
+            monkeypatch,
+            tmp_path,
+            f'{{"title": "{long_title}", "caption": "家族の声が響く夜のひととき"}}',
+        )
+        assert labels.title == "2026年7月4日の思い出"  # 超過 → 定型
+        assert labels.caption == "家族の声が響く夜のひととき"  # 上限内 → 生成値のまま
+
+        long_caption = "い" * (CAPTION_MAX_CHARS + 5)
+        labels = self._generate(
+            monkeypatch,
+            tmp_path,
+            f'{{"title": "卓袱台の灯りの下", "caption": "{long_caption}"}}',
+        )
+        assert labels.title == "卓袱台の灯りの下"  # 上限内 → 生成値のまま
+        assert labels.caption == "5枚のベストショット"  # 超過 → 定型
+
+    def test_no_truncation_across_grapheme_clusters(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """書記素境界（NFD の結合文字）の分断が構造的に起きないこと。
+
+        切り詰めが無くなったため、結合文字が途中で割れる余地そのものが無い。
+        NFD 分解した長いタイトルを入れても、返るのは定型タイトル（生成値の断片ではない）。
+        """
+        # "がぎぐげご" を NFD 分解すると 1文字＝基底＋結合濁点の2コードポイントになる。
+        title = unicodedata.normalize("NFD", "がぎぐげご" * 4)
+        assert len(title) > TITLE_MAX_CHARS
+        labels = self._generate(
+            monkeypatch, tmp_path, f'{{"title": "{title}", "caption": "c"}}'
+        )
+        assert labels.title == "2026年7月4日の思い出"
+        # 結合文字（U+3099）が単独で残ることはない。
+        assert "゙" not in labels.title
+
+    def test_surrounding_whitespace_is_trimmed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """前後の空白は除去したうえで字数を数える（空白ぶんで上限超過にしない）。
+
+        JSON 文字列に生の改行は書けないため、改行を含むケースは緩いパース経路で確認する。
+        """
+        title = "  " + "あ" * TITLE_MAX_CHARS + "  "
+        labels = self._generate(
+            monkeypatch, tmp_path, f'{{"title": "{title}", "caption": "  こんにちは  "}}'
+        )
+        assert labels.title == "あ" * TITLE_MAX_CHARS
+        assert labels.caption == "こんにちは"
+
+    def test_surrounding_whitespace_trimmed_in_loose_parse(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """緩いパース経路でも前後の空白・改行を除去して返す。"""
+        labels = self._generate(
+            monkeypatch,
+            tmp_path,
+            "タイトル:   卓袱台の灯りの下  \nキャプション:   家族の声が響く夜  \n",
+        )
+        assert labels.title == "卓袱台の灯りの下"
+        assert labels.caption == "家族の声が響く夜"
+
+    def test_over_limit_is_logged_without_generated_text(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        """超過時は warning を残すが、生成テキスト本文はログに出さない（字数のみ）。
+
+        会話由来のテキストを worker ログへ流出させないための制約（クロミ Minor 指摘）。
+        """
+        title = "笑みこぼるる夕べの茶の間のひととき"
+        with caplog.at_level("WARNING", logger="worker.labels"):
+            self._generate(
+                monkeypatch, tmp_path, f'{{"title": "{title}", "caption": "c"}}'
+            )
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            f"タイトルが上限{TITLE_MAX_CHARS}字を超過（実測{len(title)}字）" in m
+            for m in messages
+        )
+        # 本文（およびその断片）がログへ出ていないこと。
+        joined = "\n".join(messages)
+        assert title not in joined
+        assert "笑み" not in joined
+        assert "茶の間" not in joined
+
+    def test_within_limit_emits_no_warning(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        """通常ケース（上限内）は差し替えもログも起きない＝無干渉であること。"""
+        with caplog.at_level("WARNING", logger="worker.labels"):
+            labels = self._generate(
+                monkeypatch,
+                tmp_path,
+                '{"title": "卓袱台の灯りの下", "caption": "家族の声が響く夜のひととき"}',
+            )
+        assert labels.title == "卓袱台の灯りの下"
+        assert labels.caption == "家族の声が響く夜のひととき"
+        assert not [r for r in caplog.records if "超過" in r.getMessage()]
+
+    @pytest.mark.parametrize("text", ["", "   \n\t  \n"])
+    def test_blank_response_still_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, text: str
+    ):
+        """空・空白のみの応答は従来どおり定型フォールバックへ回る（回帰確認）。"""
+        labels = self._generate(monkeypatch, tmp_path, text)
+        assert labels.title == "2026年7月4日の思い出"
+        assert labels.caption == "5枚のベストショット"
+
+    def test_title_is_never_empty(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """どのような超過入力でもタイトルは空にならない（保存必須項目を守る）。"""
+        labels = self._generate(
+            monkeypatch, tmp_path, '{"title": "' + "あ" * 200 + '", "caption": ""}'
+        )
+        assert labels.title == "2026年7月4日の思い出"
+        # caption が空なら従来どおり定型キャプションで補う。
+        assert labels.caption == "5枚のベストショット"
+
+    def test_limit_applies_to_loose_parse_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """JSON でない従来形式（緩いパース）でも上限強制が効くこと。"""
+        labels = self._generate(
+            monkeypatch,
+            tmp_path,
+            f"タイトル: {'あ' * 30}\nキャプション: " + "い" * 50,
+        )
+        assert labels.title == "2026年7月4日の思い出"
+        assert labels.caption == "5枚のベストショット"
+
+    def test_limit_applies_to_azure_provider(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """Azure 版でも同じ共通経路で上限強制される（本番プロバイダの回帰確認）。"""
+        labels = self._generate(
+            monkeypatch,
+            tmp_path,
+            '{"title": "' + "あ" * 20 + '", "caption": "' + "い" * 40 + '"}',
+            azure=True,
+        )
+        assert labels.title == "2026年7月4日の思い出"
+        assert labels.caption == "5枚のベストショット"
+
+    def test_fallback_labels_are_unchanged(self):
+        """定型フォールバックの文言は不変（差し替え先が従来どおりであること）。"""
+        labels = FallbackLabelProvider().generate(_CALL_DATE, 5)
+        assert labels.title == "2026年7月4日の思い出"
+        assert labels.caption == "5枚のベストショット"

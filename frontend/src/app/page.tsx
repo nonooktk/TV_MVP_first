@@ -474,7 +474,7 @@ function HomePageInner() {
             style={{ marginTop: 8 }}
             onClick={handleOpenSettings}
           >
-            相手の設定から登録する
+            お相手の設定から登録する
           </button>
         )}
       </div>
@@ -610,7 +610,7 @@ function HomePageInner() {
           自分の設定
         </button>
         <button className="link-plain" style={{ background: "none", border: "none", cursor: "pointer" }} onClick={handleOpenSettings}>
-          相手の設定
+          お相手の設定
         </button>
       </div>
 
@@ -619,7 +619,7 @@ function HomePageInner() {
           <div className="modal-box" onClick={(e) => e.stopPropagation()}>
             <h3 style={{ marginTop: 0 }}>自分の名前</h3>
             <p style={{ fontSize: 13, color: "var(--color-text-muted)", marginTop: 0 }}>
-              通話中に相手（TV側）へ表示される、あなたの名前です（例:「たろう」）。
+              通話中にお相手（TV側）へ表示される、あなたの名前です（例:「たろう」）。
               未入力にすると表示されません。
             </p>
             <input
@@ -671,13 +671,13 @@ function HomePageInner() {
       {showLinkModal && (
         <div className="modal-overlay" onClick={() => setShowLinkModal(false)}>
           <div className="modal-box" onClick={(e) => e.stopPropagation()}>
-            <h3 style={{ marginTop: 0 }}>高齢者側デバイスの登録リンク</h3>
+            <h3 style={{ marginTop: 0 }}>お相手のテレビの登録リンク</h3>
             {linkLoading && <p>発行中…</p>}
             {linkError && <p style={{ color: "var(--color-danger)" }}>{linkError}</p>}
             {linkUrl && (
               <>
                 <p style={{ fontSize: 13, color: "var(--color-text-muted)" }}>
-                  このURLを高齢者側の端末（Chrome）で開いてもらうと、登録が完了します。
+                  このURLをお相手の端末（Chrome）で開いてもらうと、登録が完了します。
                   一度きり有効です。
                 </p>
                 <div
@@ -706,7 +706,7 @@ function HomePageInner() {
                 borderTop: "1px solid var(--color-border)",
               }}
             >
-              <h3 style={{ margin: "0 0 6px", fontSize: 15 }}>相手の名前</h3>
+              <h3 style={{ margin: "0 0 6px", fontSize: 15 }}>お相手の名前</h3>
               <p style={{ fontSize: 13, color: "var(--color-text-muted)", marginTop: 0 }}>
                 通話画面に表示される名前です（例:「おばあちゃん」）。未入力にすると表示されません。
               </p>
