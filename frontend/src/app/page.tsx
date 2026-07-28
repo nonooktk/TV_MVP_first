@@ -19,6 +19,7 @@ import {
 } from "../lib/api-client";
 import { syncPendingCalls } from "../modules/sync";
 import FamilyAuthGate from "../components/FamilyAuthGate";
+import BrandLoader from "../components/BrandLoader";
 import { getDisplayName, isEntraEnabled, logout } from "../lib/auth";
 import {
   googleLogout,
@@ -415,8 +416,18 @@ function HomePageInner() {
           </button>
         </div>
       )}
+      {/* 見出し要素は残し、中身だけをロゴ画像にする（h1 の階層・順序は不変。
+          アクセシブルな名前は alt が担うため読み上げは「見出しレベル1: おもひでてれび」）。
+          ロゴ横にテキストのワードマークは併置しない（ロゴ自体に社名が含まれるため）。 */}
       <h1 style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>
-        元気にしてる？
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          className="brand-logo"
+          src="/brand/logo.png"
+          alt="おもひでてれび"
+          width={480}
+          height={453}
+        />
       </h1>
       <p style={{ color: "var(--color-text-muted)", fontSize: 13, marginTop: 0, marginBottom: 20 }}>
         通話するとAIが感動の瞬間を自動でキャプチャします
@@ -470,7 +481,7 @@ function HomePageInner() {
 
       <section className="card">
         <h2 style={{ fontSize: 16, marginTop: 0 }}>さいきんのハイライト</h2>
-        {albumsLoading && <p style={{ fontSize: 13, color: "var(--color-text-muted)" }}>読み込み中…</p>}
+        {albumsLoading && <BrandLoader variant="inline" />}
         {albumsError && (
           <p style={{ fontSize: 13, color: "var(--color-danger)" }}>{albumsError}</p>
         )}
@@ -515,9 +526,7 @@ function HomePageInner() {
       {measurementUiEnabled && (
         <section className="card" data-testid="measurement-log-section">
           <h2 style={{ fontSize: 16, marginTop: 0 }}>計測ログ（トリガーテスト用）</h2>
-          {measurementLogsLoading && (
-            <p style={{ fontSize: 13, color: "var(--color-text-muted)" }}>読み込み中…</p>
-          )}
+          {measurementLogsLoading && <BrandLoader variant="inline" />}
           {measurementLogsError && (
             <p style={{ fontSize: 13, color: "var(--color-danger)" }}>{measurementLogsError}</p>
           )}

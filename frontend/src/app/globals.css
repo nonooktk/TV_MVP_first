@@ -1,19 +1,87 @@
-/* グローバルCSS（内製・軽量）。UIフレームワークは使わず、共通トークンのみここに定義する。 */
+/* グローバルCSS（内製・軽量）。UIフレームワークは使わず、共通トークンのみここに定義する。
+ *
+ * 2026-07-28 S2: レトロ和風デザインへ全面刷新（生成りの和紙・朱・藍）。
+ * 2026-07-28 S3: サービス名「おもひでてれび」＋全面モノクロ化（和紙の上に、墨で書く）。
+ * 正本: 02_プロジェクト/TV_MVP/デザイン仕様_S3_おもひでてれび_墨モノクロ.md
+ *   - 家族側（.family-shell）= 生成りの和紙。地の紙だけが色を持ち、載るものは墨の濃淡で語る。
+ *   - 高齢者側（.elder-shell）= 墨色キャビネット（水墨調）に収まったブラウン管テレビ。
+ *   - 朱（--color-danger / --elder-alert）は「落款印」＝削除・エラー・時間切れ警告の5箇所のみ。
+ * data-testid・DOM 構造・ロジックは変更していない（BrandLoader の追加と仕様列挙箇所を除く）。
+ * 高齢者側の文字サイズは各 page.tsx のインライン style が優先されるため現状維持される
+ * （クラス側の font-size は登録画面など他用途のための既定値）。
+ */
 
 :root {
-  --color-bg: #f7f5f2;
-  --color-surface: #ffffff;
-  --color-primary: #e8734a;
-  --color-primary-dark: #c85a34;
-  --color-accent: #4a90a4;
-  --color-text: #2b2622;
-  --color-text-muted: #756b63;
-  --color-border: #e3dcd4;
-  --color-success: #3f9142;
-  --color-danger: #c0392b;
-  --shadow-card: 0 2px 10px rgba(0, 0, 0, 0.06);
-  --radius-lg: 16px;
-  --radius-md: 10px;
+  /* ===== 墨の濃淡スケール（S3 の中核。階層を色相ではなく墨の含みで表す） ===== */
+  --sumi-900: #14110f; /* 漆黒 … 主ボタン hover */
+  --sumi-800: #241f1c; /* 濃墨 … 本文・見出し・ローダーの穂先 */
+  --sumi-700: #3a322d; /* 墨   … ワードマーク */
+  --sumi-600: #554c45; /* 中墨 … アルバム日付見出し */
+  --sumi-500: #6e6157; /* 淡墨 … 補助文 */
+  --sumi-400: #7a7268; /* 薄墨 … 操作境界 */
+  --sumi-300: #b3a99c; /* 灰墨 … 綴じ帯・非強調の記号 */
+  --sumi-200: #d8d0c0; /* 淡灰 … 装飾罫・ローダーのトラック */
+  --sumi-100: #e6dfd0; /* にじみ … 二重罫線の内側 */
+
+  /* ===== 家族側（意味づけトークン。原則こちらだけを画面 CSS から参照する） ===== */
+  --color-desk: #e6dac3;
+  --color-bg: #f2ebdc;
+  --color-surface: #fbf6ec;
+  --color-primary: #2b2521; /* 墨のベタ面。生成り抜き文字と 12.73:1 */
+  --color-primary-dark: var(--sumi-900); /* hover ＝墨を重ねる。生成り抜き 15.84:1 */
+  --color-accent: #46403a; /* 中墨（リンク）。和紙最暗 7.96:1 */
+  --color-text: var(--sumi-800); /* 濃墨。地 13.74 / 和紙最暗 12.71 / 台紙 15.14 */
+  --color-text-muted: var(--sumi-500); /* 淡墨。和紙最暗 4.66 */
+  --color-border: var(--sumi-200);
+  --color-border-strong: var(--sumi-400); /* 操作境界。和紙最暗 3.69（WCAG 1.4.11 合格） */
+  --color-rule-hair: var(--sumi-100);
+  --color-tint-primary: #ede6d6; /* バナー面（淡墨のにじみ）。濃墨と 13.12 */
+  --color-tint-paper: #e8e1d3;
+  --color-success: #4a443c; /* 成功は色ではなく文言で伝える */
+  --color-danger: #7b2118; /* 落款朱。ここ以外に赤は出さない（仕様 §2-3 の5箇所） */
+  --color-disabled-bg: #ded7c9;
+  --color-disabled-text: #786f62;
+  --shadow-card: 0 1px 0 rgba(20, 17, 15, 0.05), 0 2px 6px rgba(20, 17, 15, 0.1);
+  --radius-lg: 6px;
+  --radius-md: 4px;
+  --radius-pill: 999px;
+  --font-display: var(--font-zen-old-mincho), "Hiragino Mincho ProN", "Yu Mincho", serif;
+  --font-body: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo",
+    -apple-system, BlinkMacSystemFont, sans-serif;
+  /* 和紙の紙目（S2 から維持。画像なし・非常に淡く。コントラストは最暗セル基準で担保する） */
+  --washi-texture:
+    repeating-linear-gradient(0deg, rgba(120, 96, 60, 0.035) 0 1px, transparent 1px 3px),
+    repeating-linear-gradient(90deg, rgba(120, 96, 60, 0.028) 0 1px, transparent 1px 4px),
+    radial-gradient(120% 90% at 50% 0%, rgba(255, 252, 244, 0.6), rgba(255, 252, 244, 0) 60%);
+
+  /* ===== 高齢者側（墨色キャビネット・銀鼠） =====
+     コーディネーター裁定により、仕様 §8-1 の「厳密非劣化の代替値」を採用する。
+     着信地・時計板は仕様本文値では S2 よりコントラストが下がるため、S2 以上になる値へ
+     さらに調整した（実測は下記コメント。全 18 ペアで劣化 0 件を確認済み）。 */
+  --elder-screen: #12100d;
+  --elder-text: #f8f2e4;
+  --elder-text-sub: #dfd8c9; /* 12.87 → 13.39 */
+  --elder-status: #dcd8cc; /* 白鼠。緑を廃し 10.66 → 13.33 */
+  --elder-alert: #f2a98f; /* 高齢者側で唯一の有彩色（登録エラー・9.81 維持） */
+  --elder-cabinet: #33302b;
+  --elder-cabinet-light: #4a463f;
+  --elder-cabinet-dark: #1e1c19;
+  --elder-bezel: #121110;
+  --elder-gin: #ada79b; /* 銀鼠（S2 の真鍮を置換）。着信地 7.18 / 黒電話 7.46 / 画面 7.94 */
+  --elder-phone: #1a1714;
+  --elder-phone-hi: #3a3733;
+  --elder-incoming-bg: #1d1b18; /* 着信地（墨）。本文 15.01 → 15.39 */
+  --elder-clock-plate: #1e1c19; /* 時計文字 15.17 → 15.23 */
+  --elder-clock-plate-top: #282521; /* 時計文字 13.61 → 13.66 */
+  /* 墨色キャビネット（水墨調）。S2 の木目と同じ構造のまま値だけ差し替える。 */
+  --elder-cabinet-grain:
+    repeating-linear-gradient(93deg,
+      rgba(0, 0, 0, 0.2) 0 2px, rgba(255, 255, 255, 0.035) 2px 5px,
+      rgba(0, 0, 0, 0.1) 5px 9px, rgba(255, 255, 255, 0.05) 9px 14px),
+    repeating-linear-gradient(90deg,
+      rgba(0, 0, 0, 0.16) 0 44px, rgba(255, 255, 255, 0.04) 44px 104px),
+    radial-gradient(140% 100% at 50% 0%, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0) 62%),
+    linear-gradient(180deg, #4a463f 0%, #33302b 42%, #1e1c19 100%);
 }
 
 * {
@@ -27,10 +95,10 @@ body {
 }
 
 body {
-  background: var(--color-bg);
+  /* 帳面が置かれた机（.family-shell 480px の外側に出る色） */
+  background: var(--color-desk);
   color: var(--color-text);
-  font-family: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic",
-    "Meiryo", -apple-system, BlinkMacSystemFont, sans-serif;
+  font-family: var(--font-body);
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
 }
@@ -43,23 +111,55 @@ button {
   font-family: inherit;
 }
 
-/* 家族側画面共通: スマホ縦想定・中央寄せ */
+/* 見出しは明朝。h1〜h3 はインライン style で font-size/weight が来るため、
+   ここでは font-family と letter-spacing だけを担当する（インラインと衝突しない）。 */
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  letter-spacing: 0.05em;
+}
+
+/* 家族側画面共通: スマホ縦想定・中央寄せ。
+   ＝一冊の帳面。左右に薄い綴じ影を落として紙の存在感を出す。 */
 .family-shell {
   max-width: 480px;
   margin: 0 auto;
   min-height: 100vh;
   padding: 20px 16px 48px;
-  background: var(--color-bg);
+  background: var(--washi-texture), var(--color-bg);
+  box-shadow: 0 0 0 1px var(--color-border), 0 0 24px rgba(20, 17, 15, 0.1);
 }
 
+/* カード＝写真台紙。外枠＋内側ヘアラインの二重罫線が家族側の署名。 */
 .card {
+  position: relative;
   background: var(--color-surface);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-card);
   padding: 16px;
   margin-bottom: 16px;
 }
 
+.card::before {
+  content: "";
+  position: absolute;
+  inset: 5px;
+  border: 1px solid var(--color-rule-hair);
+  border-radius: 3px;
+  pointer-events: none;
+}
+
+/* 主ボタン＝墨の判（はん）。角丸は控えめ、影は紙に押した印のように浅く。
+   文字は生成り抜き（--color-bg）で 12.73:1。
+   ★ filter は絶対に付けないこと（S3 レビュー B-1）。
+     .btn-primary は「通話を終了する」（call）・「削除する」（album）でも使われ、
+     これらは inline style で background に落款朱 --color-danger #7B2118 を指定する。
+     CSS filter は要素の描画全体（背景を含む）に効くため、grayscale(1) を当てると
+     朱が rgb(51,51,51) に潰れ、「赤が出た＝取り返しのつかない操作」という
+     S3 の規則（§2-3・§7-15）が壊れる。トークンは既に墨なのでフィルタは不要。
+   ★ ロゴ画像を含む要素にも filter を付けないこと（mix-blend-mode が隔離され白背景が出る）。 */
 .btn-primary {
   display: inline-flex;
   align-items: center;
@@ -68,20 +168,45 @@ button {
   padding: 18px;
   font-size: 18px;
   font-weight: 700;
-  color: #fff;
+  letter-spacing: 0.04em;
+  color: var(--color-bg);
   background: var(--color-primary);
   border: none;
   border-radius: var(--radius-lg);
+  box-shadow: 0 2px 0 rgba(20, 17, 15, 0.35);
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: background 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease;
+}
+
+/* 発信ボタンの絵文字「📞 母に電話」を墨に落とすための grayscale。
+   filter は要素全体（背景を含む）に効くため、.btn-primary 全体には当てられない（B-1）。
+   朱面ボタンに当たらないスコープ＝「.card の直下」に限定する。
+   現在このセレクタが当たるのは次の 3 つで、いずれも面は墨（朱ではない）:
+     - page.tsx    「📞 母に電話」    （.card 直下・唯一の絵文字）
+     - select.tsx  「アルバムを見る」  （.card 直下・文字のみ）
+     - album.tsx   「母に電話」        （.card 直下・文字のみ）
+   朱面の 2 ボタンは .modal-box 直下（album「削除する」）と無名 div 直下
+   （call「通話を終了する」）にあり、このセレクタには当たらない。
+   ★警告: 落款朱（background: var(--color-danger)）の .btn-primary を
+     .card の直下に置かないこと。置くと朱が rgb(51,51,51) に潰れて B-1 が再発する。
+     朱面ボタンはモーダル内など .card の直下以外に配置すること。 */
+.card > .btn-primary {
+  filter: grayscale(1);
 }
 
 .btn-primary:hover {
   background: var(--color-primary-dark);
 }
 
+.btn-primary:active {
+  transform: translateY(1px);
+  box-shadow: 0 1px 0 rgba(20, 17, 15, 0.35);
+}
+
 .btn-primary:disabled {
-  background: #cbbfb5;
+  background: var(--color-disabled-bg);
+  color: var(--color-disabled-text);
+  box-shadow: none;
   cursor: not-allowed;
 }
 
@@ -93,116 +218,360 @@ button {
   padding: 14px;
   font-size: 15px;
   font-weight: 600;
+  letter-spacing: 0.04em;
   color: var(--color-text);
   background: var(--color-surface);
-  border: 1px solid var(--color-border);
+  /* 操作要素の境界は 3:1 以上（WCAG 1.4.11）を満たす濃さにする */
+  border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-md);
   cursor: pointer;
 }
 
+.btn-secondary:hover {
+  background: var(--color-tint-paper);
+}
+
+/* リンクは「色の違いだけ」で表さない（モノクロ化で色相の手がかりが消えるため・WCAG 1.4.1）。
+   S2 では hover 時のみだった下線を常時表示にする。 */
 .link-plain {
   color: var(--color-accent);
-  text-decoration: none;
+  text-decoration: underline;
+  text-underline-offset: 2px;
   font-size: 14px;
 }
 
 .link-plain:hover {
-  text-decoration: underline;
+  text-decoration-thickness: 2px;
 }
 
+/* バナー＝短冊。左端に墨の細帯を置き、帳面に挟んだ栞に見せる。 */
 .banner {
-  background: linear-gradient(135deg, #fff3e6, #ffe6d6);
-  border: 1px solid #f3d3b8;
+  background: var(--color-tint-primary);
+  border: 1px solid var(--color-border);
+  border-left: 4px solid var(--color-primary);
   border-radius: var(--radius-md);
   padding: 12px 14px;
   margin-bottom: 16px;
   font-size: 14px;
 }
 
-/* 高齢者側画面共通: 横画面・大きな文字 */
+/* 家族側ヘッダ（BackHeader）。「← ホームへ」とロゴを両端に置き、下に帳面の罫線を引く。 */
+.page-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+/* ワードマーク。ひらがな7字は字面が小さいため S2 の 0.18em から詰める（S3 §5-3）。
+   ヘッダの主役はページタイトルなので、ワードマークは一段引いた墨（--sumi-700）にする。
+   下に墨のヘアラインを短く引いて「留め」とする（朱は落款用途のみのため使わない）。 */
+.brand-mark {
+  position: relative;
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 400;
+  letter-spacing: 0.1em;
+  color: var(--sumi-700);
+  white-space: nowrap;
+}
+
+.brand-mark::after {
+  content: "";
+  position: absolute;
+  right: 0.1em;
+  bottom: -5px;
+  width: 1.2em;
+  height: 2px;
+  background: var(--sumi-800);
+}
+
+/* S2 にあった `.family-shell > h1 { letter-spacing: 0.18em }`（ホームのロゴ用）は
+   ホームの h1 の中身がロゴ画像になったため削除した（S3 §5-3）。
+   album / select の h1 は画面見出しなので字間を仕様 §3-3 の 0.06em にする。
+   BackHeader（.page-header）を持つページだけが該当するため、後続兄弟セレクタで分離する。 */
+.family-shell > .page-header ~ h1 {
+  letter-spacing: 0.06em;
+}
+
+/* アルバムの日付見出し（album ページの section 直下 h2 のみに当たる。
+   ホームの section.card > h2 とはセレクタで分離されるため他画面に影響しない）。 */
+.family-shell > section:not(.card) > h2 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: 0.24em;
+  /* 画面地の上に直接置かれる文字。中墨で 地 7.06 / 和紙最暗 6.53（S2 の金茶 4.71 から改善） */
+  color: var(--sumi-600);
+}
+
+.family-shell > section:not(.card) > h2::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, var(--color-border), transparent);
+}
+
+/* アルバムカードだけ左端に綴じ帯（既存の data-album-status 属性を使う＝DOM 変更ゼロ）。
+   .card と同じ詳細度のため、padding の上書きには .card より後ろに置くことが必要。 */
+[data-album-status] {
+  padding-left: 22px;
+}
+
+[data-album-status]::after {
+  content: "";
+  position: absolute;
+  left: 7px;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 2px;
+  /* 綴じ帯。真鍮 → 灰墨。灰墨は真鍮より弱いため opacity を 0.55 → 0.7 に補正する。 */
+  background: repeating-linear-gradient(
+    180deg,
+    var(--sumi-300) 0 10px,
+    transparent 10px 18px
+  );
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+/* 高齢者側画面共通: 横画面・大きな文字。
+   ＝木目キャビネットに収まったブラウン管テレビ。 */
 .elder-shell {
+  position: relative;
+  isolation: isolate; /* ::before を自分の背景の上・子要素の下に置くため */
   min-height: 100vh;
   width: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  background: #1c2b3a;
-  color: #fff;
+  background: var(--elder-cabinet-grain);
+  color: var(--elder-text);
+  font-family: var(--font-body);
   text-align: center;
-  padding: 24px;
+  padding: 3.4vw; /* 24px 固定から枠幅に連動する値へ */
 }
 
+/* ブラウン管の画面面。枠（キャビネット）の内側にはめ込まれた板ガラスに見せる。
+   走査線・ノイズ等の視認性を下げる CRT 演出は入れない（仕様 §6-4）。 */
+.elder-shell::before {
+  content: "";
+  position: fixed;
+  inset: 2.6vw;
+  z-index: -1;
+  border-radius: 2.2vw;
+  background: var(--elder-screen);
+  box-shadow:
+    0 0 0 0.45vw var(--elder-bezel),
+    0 0 0 0.55vw rgba(255, 255, 255, 0.06),
+    inset 0 0 7vw rgba(0, 0, 0, 0.8);
+}
+
+/* キャビネット下辺の銀鼠ブランドプレート（DOM 変更なし。装飾のため読み上げ対象にしない）。
+   ひらがな7字 × 広い字間では横に伸びすぎるため、S2 の 0.42em から 0.30em へ詰める。
+   12px 下限は S2 QA 指摘⑤を継承（1.15vw が 12px を上回るのは 1044px 幅以上）。 */
+.elder-shell::after {
+  content: "おもひでてれび";
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0.45vw;
+  z-index: 1;
+  font-family: var(--font-display);
+  font-size: max(12px, 1.15vw);
+  letter-spacing: 0.3em;
+  text-indent: 0.3em; /* 字間で右にずれる分を戻す */
+  color: var(--elder-gin);
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+
+/* 待受アルバム動画（data-testid は参照するだけで変更しない）。
+   インライン style（position:fixed; inset:0; width/height:100%）を DOM 変更なしで
+   テレビ枠の内側へ収めるため、この 3 セレクタに限り !important を使う（仕様 §6-10）。 */
+[data-testid="standby-album-video"] {
+  inset: 2.6vw !important;
+  width: auto !important;
+  height: auto !important;
+  border-radius: 2.2vw !important;
+}
+
+/* 枠に食い込まないよう、固定配置の UI を枠の内側へ寄せる（Chrome 限定運用のため :has() 可）。
+ *
+ * :has() 非対応ブラウザ（TV 内蔵 Chrome の旧世代など）向けフォールバック:
+ *   時計コンテナはインライン style の left/top:24px のままだと画面内枠（inset:2.6vw）に
+ *   食い込む。親を選ぶ :has() が使えない環境でも枠内へ収めるため、子要素側（時計・日付・
+ *   状態の 3 兄弟）を同じ量だけ相対移動させてグループごとずらす。
+ *   親セレクタも DOM 変更も使わないため、あらゆるブラウザで有効。
+ *   これらのクラスは待受画面の時計グループ以外では使用していない。 */
+.elder-clock,
+.elder-date,
+.elder-status {
+  position: relative;
+  left: calc(4.4vw - 24px);
+  top: calc(4.4vw - 24px);
+}
+
+/* :has() 対応時は親コンテナ自体を動かすので、上のフォールバックを打ち消す（二重移動の防止）。
+   :has() 非対応ブラウザではこのブロック全体が無効となり、フォールバックだけが残る。 */
+.elder-shell > div:has(> .elder-clock) {
+  left: 4.4vw !important;
+  top: 4.4vw !important;
+}
+
+.elder-shell > div:has(> .elder-clock) .elder-clock,
+.elder-shell > div:has(> .elder-clock) .elder-date,
+.elder-shell > div:has(> .elder-clock) .elder-status {
+  left: 0;
+  top: 0;
+}
+
+/* 位置・サイズ・色は S2 のまま。filter は 🔇🔊 の絵文字を墨に落とすためだけに使う。 */
+[data-testid="standby-mute-toggle"] {
+  top: 4.4vw !important;
+  right: 4.4vw !important;
+  filter: grayscale(1);
+}
+
+/* パタパタ時計。DOM を変えないため実際のフリップ動作は行わず、板面の質感と
+   中央の合わせ目で趣を作る。数字は機械が示す事実＝ゴシック＋等幅数字。 */
 .elder-clock {
-  font-size: 10vw;
+  display: inline-block;
+  font-size: 10vw; /* 既定値。standby はインラインで 6.5vw に上書きされる＝現状維持 */
   font-weight: 700;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.06em;
   line-height: 1.1;
+  font-variant-numeric: tabular-nums; /* 桁が揺れない */
+  color: var(--elder-text);
+  padding: 0.5em 0.42em 0.46em;
+  border-radius: 0.12em;
+  /* 上下 2 枚の板。中央 50% に合わせ目の陰と光を通す。 */
+  background:
+    linear-gradient(180deg,
+      var(--elder-clock-plate-top) 0 calc(50% - 1px),
+      rgba(0, 0, 0, 0.85) calc(50% - 1px) 50%,
+      rgba(255, 255, 255, 0.07) 50% calc(50% + 1px),
+      var(--elder-clock-plate) calc(50% + 1px) 100%);
+  box-shadow:
+    inset 0 0.06em 0 rgba(255, 255, 255, 0.09),
+    0 0.6vw 1.6vw rgba(0, 0, 0, 0.55);
+  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.85);
 }
 
 .elder-date {
-  font-size: 3vw;
+  font-size: 3vw; /* standby はインライン 2vw で上書き＝現状維持 */
   margin-top: 12px;
-  color: #cfe0ea;
+  letter-spacing: 0.1em;
+  color: var(--elder-text-sub);
 }
 
 .elder-status {
   margin-top: 24px;
-  font-size: 2.4vw;
-  color: #8fd19e;
+  font-size: 2.4vw; /* standby はインライン 1.6vw ＝現状維持 */
+  letter-spacing: 0.08em;
+  color: var(--elder-status);
 }
 
 .elder-incoming {
   position: fixed;
   inset: 0;
-  background: #24406b;
-  color: #fff;
+  background: var(--elder-cabinet-grain);
+  color: var(--elder-text);
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 32px;
   text-align: center;
-  padding: 24px;
+  padding: 3.4vw;
   z-index: 10;
 }
 
-.elder-incoming-text {
-  font-size: 5vw;
-  font-weight: 700;
+/* 着信も同じテレビ枠の中で起きる（漆の面） */
+.elder-incoming::before {
+  content: "";
+  position: fixed;
+  inset: 2.6vw;
+  z-index: -1;
+  border-radius: 2.2vw;
+  background: var(--elder-incoming-bg);
+  box-shadow: 0 0 0 0.45vw var(--elder-bezel), inset 0 0 7vw rgba(0, 0, 0, 0.75);
 }
 
+.elder-incoming-text {
+  font-size: 5vw; /* 現状維持 */
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1.35;
+  color: var(--elder-text); /* 15.01:1 */
+}
+
+/* 「でる」＝黒電話。サイズは現状と完全に同じ（40vw / max 320px）。
+   box-sizing: border-box が全体に効いているため、真鍮リングを border で足しても外径は変わらない。 */
 .btn-answer {
+  position: relative;
   width: 40vw;
   height: 40vw;
   max-width: 320px;
   max-height: 320px;
   border-radius: 50%;
-  background: #2e9e4d;
-  color: #fff;
-  font-size: 4vw;
+  /* 木目/漆に対し 6.92:1（1.4.11 合格）。
+     外径は 40vw / max 320px で頭打ちになる（40vw = 320px となるのは 800px 幅）ため、
+     文字と枠線にも上限を与えないと 4K 幅（3840px）で文字 154px・枠線 27px となり
+     「でる」がボタン内に収まらない。上限は 1920px 幅における現行値
+     （4vw = 76.8px / 0.7vw = 13.44px）に固定する＝1920px 以下では現行と完全に同一で、
+     文字サイズ・枠線とも一切縮まない（仕様 §6-1・§6-3 を満たす）。 */
+  border: min(0.7vw, 13.44px) solid var(--elder-gin);
+  color: #fff; /* 黒電話面に対し 17.85:1 */
+  font-size: min(4vw, 76.8px); /* 1920px 以下は 4vw のまま＝現状維持 */
   font-weight: 700;
-  border: none;
+  letter-spacing: 0.12em;
   cursor: pointer;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  /* ダイヤルの指穴 10 個（文字と重ならない外周 44% の円周上に配置）＋受話器の反射 */
+  background:
+    radial-gradient(circle at 28.0% 88.1%, rgba(255, 255, 255, 0.12) 0 3.4%, transparent 3.7%),
+    radial-gradient(circle at 10.7% 69.8%, rgba(255, 255, 255, 0.12) 0 3.4%, transparent 3.7%),
+    radial-gradient(circle at 6.3% 44.9%, rgba(255, 255, 255, 0.12) 0 3.4%, transparent 3.7%),
+    radial-gradient(circle at 16.3% 21.7%, rgba(255, 255, 255, 0.12) 0 3.4%, transparent 3.7%),
+    radial-gradient(circle at 37.4% 7.9%, rgba(255, 255, 255, 0.12) 0 3.4%, transparent 3.7%),
+    radial-gradient(circle at 62.6% 7.9%, rgba(255, 255, 255, 0.12) 0 3.4%, transparent 3.7%),
+    radial-gradient(circle at 83.7% 21.7%, rgba(255, 255, 255, 0.12) 0 3.4%, transparent 3.7%),
+    radial-gradient(circle at 93.7% 44.9%, rgba(255, 255, 255, 0.12) 0 3.4%, transparent 3.7%),
+    radial-gradient(circle at 89.3% 69.8%, rgba(255, 255, 255, 0.12) 0 3.4%, transparent 3.7%),
+    radial-gradient(circle at 72.0% 88.1%, rgba(255, 255, 255, 0.12) 0 3.4%, transparent 3.7%),
+    radial-gradient(circle at 38% 30%, var(--elder-phone-hi) 0%, var(--elder-phone) 62%);
+  box-shadow:
+    0 1.2vw 3vw rgba(0, 0, 0, 0.6),
+    inset 0 0 2.4vw rgba(0, 0, 0, 0.55);
+}
+
+.btn-answer:active {
+  transform: translateY(0.3vw);
 }
 
 .btn-hangup {
   padding: 10px 28px;
-  font-size: 1.6vw;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.15);
-  color: #fff;
-  border: 1px solid rgba(255, 255, 255, 0.4);
+  font-size: 1.6vw; /* 現状維持 */
+  border-radius: var(--radius-pill);
+  background: rgba(0, 0, 0, 0.45);
+  color: var(--elder-text);
+  border: 1px solid var(--elder-gin);
   cursor: pointer;
 }
 
 .btn-elder-action {
   margin-top: 40px;
   padding: 16px 32px;
-  font-size: 2.2vw;
+  font-size: 2.2vw; /* 現状維持 */
   font-weight: 700;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--color-primary);
   color: #fff;
   border: none;
@@ -253,7 +622,8 @@ button {
   padding: 8px 0;
   font-size: 13px;
   font-weight: 600;
-  border: 1px solid var(--color-border);
+  letter-spacing: 0.06em;
+  border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-md);
   background: var(--color-surface);
   color: var(--color-text-muted);
@@ -270,7 +640,7 @@ button {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: rgba(20, 17, 15, 0.55);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -280,10 +650,200 @@ button {
 
 .modal-box {
   background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-lg);
+  box-shadow: 0 8px 32px rgba(20, 17, 15, 0.28);
   padding: 20px;
   max-width: 440px;
   width: 100%;
   max-height: 90vh;
   overflow-y: auto;
+}
+
+/* キーボード操作の可視化（現状は未指定＝ブラウザ既定のみ。明示する） */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+[role="tab"]:focus-visible {
+  outline: 3px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* 高齢者側は暗背景のため、フォーカスリングを銀鼠に切り替える。
+   銀鼠は最悪ケース（キャビネット上面）でも 3.92:1 で WCAG 1.4.11 の 3:1 を満たす
+   （S2 の真鍮 3.40:1 から改善）。
+   対象は .btn-answer / .btn-hangup / .btn-elder-action / ミュートトグルの 4 コントロール。 */
+.elder-shell :focus-visible,
+.elder-incoming :focus-visible {
+  outline-color: var(--elder-gin);
+}
+
+/* ===== ロゴ（S3） =====
+   支給 logo.png は白背景・完全不透明のため、multiply で白だけを抜いて和紙に馴染ませる
+   （白×背景=背景／黒×背景=黒。紙目テクスチャもロゴの内側を透ける）。
+   ★禁止: この要素の祖先に filter / opacity<1 / backdrop-filter / isolation / will-change:opacity
+     を付けないこと。いずれもスタッキングコンテキストを作り multiply を隔離して白い四角が出る。
+   ★禁止: 暗い面（通話画面・高齢者側・モーダルオーバーレイ上）に置かないこと（背景に溶ける）。 */
+.brand-logo {
+  display: block;
+  /* 96px 未満では円環内の「おもひで てれび」が判読できないため下限を明示する */
+  width: max(96px, min(132px, 46vw));
+  height: auto;
+  aspect-ratio: 960 / 906;
+  margin: 0 auto 4px;
+  mix-blend-mode: multiply;
+}
+
+/* 強制カラーモードでは blend が無効になり白背景が出るため、multiply を切って
+   白地のまま表示させる（判読性は保たれる）。 */
+@media (forced-colors: active) {
+  .brand-logo,
+  .brand-loader__logo {
+    mix-blend-mode: normal;
+  }
+}
+
+/* ===== BrandLoader（S3） =====
+   既存の「読み込み中…」テキストを置き換える表示専用コンポーネント。
+   状態変数・API 呼び出し・タイムアウトは一切変更していないため、消滅条件は従来どおり
+   既存の loading フラグが false になること（＝表示を差し替えただけで挙動は不変）。 */
+.brand-loader {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  width: 100%;
+  padding: 48px 16px;
+  text-align: center;
+}
+
+/* インライン版はセクションの中に収まる小型。バーは幅いっぱいに引く。 */
+.brand-loader--inline {
+  gap: 8px;
+  padding: 10px 0;
+  align-items: stretch;
+}
+
+/* ロゴ: 和紙に墨が染みるように現れる。
+   ★ opacity / transform はこの要素自身に当てる（親に当てると multiply が効かなくなる）。 */
+.brand-loader__logo {
+  width: min(160px, 40vw);
+  height: auto;
+  aspect-ratio: 960 / 906;
+  mix-blend-mode: multiply;
+  /* 220ms の遅延 = 速い読み込みではロゴを出さない（ちらつきを JS のタイマーなしで防ぐ） */
+  animation: brand-logo-in 520ms cubic-bezier(0.22, 0.61, 0.36, 1) 220ms both;
+}
+
+@keyframes brand-logo-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 墨バー: track は淡灰、走るのは穂先（不定形の墨）。
+   実進捗は取得していないため、％表示や到達点のあるバーにはしない（仕様 §7-21）。 */
+.brand-loader__bar {
+  position: relative;
+  width: min(180px, 60%);
+  height: 4px;
+  background: var(--sumi-200);
+  border-radius: 2px;
+  overflow: hidden;
+  animation: brand-fade-in 240ms ease-out 320ms both;
+}
+
+.brand-loader--inline .brand-loader__bar {
+  width: 100%;
+  height: 3px;
+}
+
+/* 流れる墨。両端が透明のグラデ＋走行中の scaleX 変化で「不定形」に見せる。 */
+.brand-loader__bar::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 42%;
+  border-radius: 2px;
+  background: linear-gradient(
+    90deg,
+    rgba(36, 31, 28, 0) 0%,
+    rgba(36, 31, 28, 0.35) 18%,
+    var(--sumi-800) 46%,
+    rgba(36, 31, 28, 0.55) 74%,
+    rgba(36, 31, 28, 0) 100%
+  );
+  transform-origin: 50% 50%;
+  animation: sumi-flow 1500ms cubic-bezier(0.65, 0.02, 0.36, 1) 420ms infinite;
+}
+
+@keyframes sumi-flow {
+  0% {
+    transform: translateX(-115%) scaleX(0.75);
+  }
+  55% {
+    transform: translateX(90%) scaleX(1.25);
+  }
+  100% {
+    transform: translateX(260%) scaleX(0.8);
+  }
+}
+
+/* 状態を図形だけで伝えない（WCAG 1.4.1）。文言は常に表示する。 */
+.brand-loader__label {
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  color: var(--color-text-muted); /* 和紙最暗セル上 4.66:1 */
+  animation: brand-fade-in 240ms ease-out 320ms both;
+}
+
+.brand-loader--inline .brand-loader__label {
+  font-size: 12px;
+  text-align: left;
+}
+
+@keyframes brand-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* 動きを減らす設定を尊重（既存の spinner / card-highlight ＋ S3 の BrandLoader）。
+   ローダーは一切動かさず、静止した墨の一筆で「進行中」を示す。意味は常に表示される
+   文言（label）が担うため、動きを止めても情報は欠落しない。 */
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 2.4s;
+  }
+
+  .card-highlight {
+    animation: none;
+    box-shadow: 0 0 0 3px var(--color-primary);
+  }
+
+  .brand-loader__logo,
+  .brand-loader__bar,
+  .brand-loader__label {
+    animation-duration: 1ms;
+    animation-delay: 0ms;
+    animation-iteration-count: 1;
+  }
+
+  .brand-loader__bar::before {
+    animation: none;
+    width: 55%;
+    transform: translateX(22%);
+    background: var(--sumi-600);
+  }
 }

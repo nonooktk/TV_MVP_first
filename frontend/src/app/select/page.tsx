@@ -20,6 +20,7 @@ import { ApiError, Candidate, getCandidates, submitSelection } from "../../lib/a
 import BackHeader from "../../components/BackHeader";
 import ThumbImage from "../../components/ThumbImage";
 import FamilyAuthGate from "../../components/FamilyAuthGate";
+import BrandLoader from "../../components/BrandLoader";
 
 const REQUIRED_COUNT = 5;
 
@@ -29,9 +30,11 @@ const REQUIRED_COUNT = 5;
  * 返り値 null のときはバッジを出さない（想定外値）。
  */
 function streamBadge(stream: unknown): { label: string; color: string } | null {
-  if (stream === "family") return { label: "孫", color: "#e8734a" };
+  // S3: モノクロ化により濃墨／淡墨の濃淡差に変更（白文字で 16.31:1 / 5.98:1）。
+  // 識別は「孫」「祖父母」のラベル文言が担うため、濃淡差は補助にとどめる（WCAG 1.4.1）。
+  if (stream === "family") return { label: "孫", color: "#241f1c" };
   if (stream === "elder" || stream === undefined || stream === null)
-    return { label: "祖父母", color: "#4a7ae8" };
+    return { label: "祖父母", color: "#6e6157" };
   return null;
 }
 
@@ -192,7 +195,7 @@ function SelectPageInner() {
       <BackHeader />
       <h1 style={{ fontSize: 20 }}>ベストショットを5枚選ぶ</h1>
 
-      {loading && <p>読み込み中…</p>}
+      {loading && <BrandLoader label="候補を読み込んでいます…" />}
 
       {!loading && errorState === "generating" && (
         <div className="card">
@@ -269,7 +272,8 @@ function SelectPageInner() {
                       ? "3px solid var(--color-primary)"
                       : "1px solid var(--color-border)",
                     cursor: "pointer",
-                    background: "#eee",
+                    // 読み込み前の面が白浮きしないよう和紙の台紙色にする
+                    background: "var(--color-tint-paper)",
                   }}
                 >
                   <ThumbImage

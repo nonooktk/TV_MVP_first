@@ -1300,7 +1300,8 @@ function shortFaceReason(reason: string | null): string {
 const overlayStyle: CSSProperties = {
   position: "absolute",
   inset: 0,
-  background: "rgba(17,17,17,0.82)",
+  // 墨黒（--elder-screen 系）。映像の色再現を妨げないよう装飾は足さない。
+  background: "rgba(18, 16, 13, 0.86)",
   display: "flex",
   flexDirection: "column",
   alignItems: "center",
