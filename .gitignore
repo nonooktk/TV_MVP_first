@@ -54,3 +54,16 @@ backend/cloud.env
 
 # Claude 用プロジェクトメモリ（ローカル専用・リポジトリ管理外）
 CLAUDE.md
+
+# TWA 署名キー（秘匿情報。絶対にコミットしない）
+*.keystore
+*.jks
+signing/
+
+# TWA ビルド成果物
+android-twa/app/
+android-twa/build/
+android-twa/.gradle/
+android-twa/*.apk
+android-twa/*.aab
+android-twa/*.keystore
