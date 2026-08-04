@@ -4,6 +4,7 @@
 // UIフレームワークは使わず、グローバルCSS1枚のみ読み込む。
 
 import { Zen_Old_Mincho } from "next/font/google";
+import ServiceWorkerRegister from "../components/ServiceWorkerRegister";
 import "./globals.css";
 
 // 日本語フォントは unicode-range で細かく分割配信される（Zen Old Mincho は 244 スライス）。
@@ -27,15 +28,30 @@ const zenOldMincho = Zen_Old_Mincho({
   variable: "--font-zen-old-mincho",
 });
 
+// PWA 化（T1）: 家族側 manifest を全ルートの既定として参照させる。
+// /elder/* は src/app/elder/layout.tsx が elder.webmanifest で上書きする。
+// 静的ファイル＋明示的な metadata.manifest 方式を採る（app/manifest.ts のファイル規約は
+// 使わない）。ファイル規約は全ルートへ自動注入されるため、/elder/* で差し替わるかが
+// バージョン依存になるのに対し、この方式なら out/ の HTML を grep して確認できる。
 export const metadata = {
   title: "おもひでてれび",
   description: "おもひでてれび — 離れて暮らす家族をつなぐビデオ通話と、思い出のアルバム",
+  manifest: "/manifest.webmanifest",
+};
+
+// themeColor は Next.js 14 以降 metadata ではなく viewport エクスポートに移っている
+// （metadata に書くとビルド時に警告が出る）。値は和紙 --color-bg（S3 デザイン仕様の実値）。
+export const viewport = {
+  themeColor: "#f2ebdc",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="ja" className={zenOldMincho.variable}>
-      <body>{children}</body>
+      <body>
+        <ServiceWorkerRegister />
+        {children}
+      </body>
     </html>
   );
 }

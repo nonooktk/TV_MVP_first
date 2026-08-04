@@ -28,6 +28,7 @@ import {
   type PlayingAlbum,
 } from "../../../modules/standbyAlbum";
 import { ringtoneAction } from "../../../modules/incomingRingtone";
+import { startScreenWakeLock } from "../../../modules/screenWakeLock";
 import {
   CallHandle,
   startCall,
@@ -100,6 +101,12 @@ export default function ElderStandbyPage() {
   useEffect(() => {
     setHasDeviceToken(!!getDeviceToken());
   }, []);
+
+  // 画面消灯の抑止（Screen Wake Lock）。待受は常時給電の無人端末で動き、画面が消えると
+  // 着信に気づけないため、マウント〜アンマウントの通し1本で保持する（フェーズに依存させ
+  // ない＝通話中も保持したままにする）。非対応ブラウザ・取得失敗時は何も起きないだけで、
+  // 待受の動作には影響しない。実装とその根拠は modules/screenWakeLock.ts を参照。
+  useEffect(() => startScreenWakeLock(), []);
 
   // デバッグパネル: 通話中の「デバッグ」ボタンで開閉する。?debug=1 で初期表示ON（後方互換）。
   // 高齢者側の standby は静的エクスポートページなので location.search を直接見る。
