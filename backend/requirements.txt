@@ -8,8 +8,8 @@
 # 厳密な版は requirements.lock.txt を参照。
 
 # --- Web フレームワーク ---
-fastapi==0.139.2
-uvicorn[standard]==0.51.0
+fastapi==0.141.1
+uvicorn[standard]==0.52.1
 
 # --- Agora トークン生成（M1・A2）---
 agora-token-builder==1.0.0
