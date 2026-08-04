@@ -19,6 +19,7 @@
 // data-testid は追加しない（既存の維持が T1 の DoD）。
 
 import { useEffect } from "react";
+import { startServiceWorkerUpdates } from "../modules/swUpdateScheduler";
 
 export default function ServiceWorkerRegister() {
   useEffect(() => {
@@ -30,20 +31,38 @@ export default function ServiceWorkerRegister() {
     // 非セキュアで register() を呼ぶと例外になるため、事前に弾く。
     if (!window.isSecureContext) return;
 
+    let cancelled = false;
+    let stopUpdates: (() => void) | null = null;
+
     const register = () => {
-      navigator.serviceWorker.register("/sw.js").catch(() => {
-        // 登録失敗はアプリの機能に影響しないため、握りつぶす。
-      });
+      navigator.serviceWorker
+        .register("/sw.js")
+        .then((registration) => {
+          // アンマウント後に解決した場合はタイマーを張らない。
+          if (cancelled) return;
+          // 無人待受端末はナビゲーションが起きず、ブラウザ既定の更新契機を踏まない。
+          // 1 時間ごとに update() を呼び、sw.js の修正が届く経路を自前で作る（T4 M-6）。
+          // 根拠と設計は modules/swUpdateScheduler.ts を参照。
+          stopUpdates = startServiceWorkerUpdates(registration);
+        })
+        .catch(() => {
+          // 登録失敗はアプリの機能に影響しないため、握りつぶす。
+        });
     };
 
     // load 済みなら即座に、未了なら load を待って登録する
     // （effect が load 後に走るケースでは load イベントが二度と来ないため）。
     if (document.readyState === "complete") {
       register();
-      return;
+    } else {
+      window.addEventListener("load", register);
     }
-    window.addEventListener("load", register);
-    return () => window.removeEventListener("load", register);
+
+    return () => {
+      cancelled = true;
+      if (stopUpdates) stopUpdates();
+      window.removeEventListener("load", register);
+    };
   }, []);
 
   return null;

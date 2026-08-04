@@ -7,9 +7,10 @@
 // 主眼は ARCHITECTURE §7-1 の遷移「取得 → 非表示で解放 → 表示で再取得 → 停止で解放」と、
 // 非対応・失敗時に何も壊さないこと。
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   startScreenWakeLock,
+  WAKE_LOCK_RETRY_INTERVAL_MS,
   type WakeLockDocumentLike,
   type WakeLockNavigatorLike,
   type WakeLockSentinelLike,
@@ -250,5 +251,114 @@ describe("startScreenWakeLock", () => {
     // 取りっぱなしにならないこと。
     expect(sentinels).toHaveLength(1);
     expect(sentinels[0].releaseCallCount).toBe(1);
+  });
+});
+
+// --- 取得失敗後の定期リトライ（T4 悲観レビュー M-4） ---
+//
+// 待受端末は可視のまま何日も放置されるため visibilitychange が起きない。
+// 「一度失敗したら二度と取り直さない」状態を塞げているかを、時間を進めて検証する。
+describe("startScreenWakeLock（取得失敗後のリトライ）", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** 指定回数だけ失敗し、以後は成功する navigator を作る。 */
+  function makeFlakyNavigator(failTimes: number): {
+    nav: WakeLockNavigatorLike;
+    sentinels: FakeSentinel[];
+    requestCount: () => number;
+  } {
+    const sentinels: FakeSentinel[] = [];
+    let count = 0;
+    const nav: WakeLockNavigatorLike = {
+      wakeLock: {
+        request: async () => {
+          count += 1;
+          if (count <= failTimes) {
+            // 省電力モード中の request() を模す。
+            const err = new Error("denied");
+            err.name = "NotAllowedError";
+            throw err;
+          }
+          const s = new FakeSentinel();
+          sentinels.push(s);
+          return s;
+        },
+      },
+    };
+    return { nav, sentinels, requestCount: () => count };
+  }
+
+  it("失敗しても可視のまま一定時間で再取得を試み、成功したら保持する", async () => {
+    vi.useFakeTimers();
+    const { nav, sentinels, requestCount } = makeFlakyNavigator(1);
+    const doc = new FakeDocument(); // 可視のまま一度も変化させない
+
+    const stop = startScreenWakeLock({ navigator: nav, document: doc });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(requestCount()).toBe(1); // 1 回目は失敗
+
+    // visibilitychange を一切起こさずに時間だけ進める。
+    await vi.advanceTimersByTimeAsync(WAKE_LOCK_RETRY_INTERVAL_MS);
+
+    // 修正前はここが 1 のまま（＝二度と取り直さない）だった。
+    expect(requestCount()).toBe(2);
+    expect(sentinels).toHaveLength(1);
+    expect(sentinels[0].released).toBe(false);
+
+    stop();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sentinels[0].releaseCallCount).toBe(1);
+  });
+
+  it("リトライ間隔前には再取得しない", async () => {
+    vi.useFakeTimers();
+    const { nav, requestCount } = makeFlakyNavigator(1);
+    const doc = new FakeDocument();
+
+    const stop = startScreenWakeLock({ navigator: nav, document: doc });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(requestCount()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(WAKE_LOCK_RETRY_INTERVAL_MS - 1);
+    expect(requestCount()).toBe(1);
+
+    stop();
+  });
+
+  it("取得できたあとはリトライタイマーが再取得を繰り返さない", async () => {
+    vi.useFakeTimers();
+    const { nav, requestCount } = makeFlakyNavigator(1);
+    const doc = new FakeDocument();
+
+    const stop = startScreenWakeLock({ navigator: nav, document: doc });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(WAKE_LOCK_RETRY_INTERVAL_MS);
+    expect(requestCount()).toBe(2); // ここで取得成功
+
+    // さらに 10 周期ぶん進めても、保持中なので request は増えない。
+    await vi.advanceTimersByTimeAsync(WAKE_LOCK_RETRY_INTERVAL_MS * 10);
+    expect(requestCount()).toBe(2);
+
+    stop();
+  });
+
+  it("停止するとリトライタイマーも止まる", async () => {
+    vi.useFakeTimers();
+    // 常に失敗し続ける（リトライが延々と走る）ケース。
+    const { nav, requestCount } = makeFlakyNavigator(Number.POSITIVE_INFINITY);
+    const doc = new FakeDocument();
+
+    const stop = startScreenWakeLock({ navigator: nav, document: doc });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(WAKE_LOCK_RETRY_INTERVAL_MS);
+    expect(requestCount()).toBe(2);
+
+    stop();
+    await vi.advanceTimersByTimeAsync(WAKE_LOCK_RETRY_INTERVAL_MS * 5);
+    // 停止後は 1 回も増えない（タイマーが残ると無人端末で回り続ける）。
+    expect(requestCount()).toBe(2);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

@@ -28,6 +28,7 @@ import {
   type PlayingAlbum,
 } from "../../../modules/standbyAlbum";
 import { ringtoneAction } from "../../../modules/incomingRingtone";
+import { requestPersistentStorage } from "../../../modules/persistentStorage";
 import { startScreenWakeLock } from "../../../modules/screenWakeLock";
 import {
   CallHandle,
@@ -107,6 +108,14 @@ export default function ElderStandbyPage() {
   // ない＝通話中も保持したままにする）。非対応ブラウザ・取得失敗時は何も起きないだけで、
   // 待受の動作には影響しない。実装とその根拠は modules/screenWakeLock.ts を参照。
   useEffect(() => startScreenWakeLock(), []);
+
+  // ストレージの永続化申請（T4 悲観レビュー M-3）。device_token（localStorage）は
+  // Cache Storage とオリジン単位の quota を共有しており、逼迫時の eviction で一緒に
+  // 消えうる。消えると待受は未登録状態に落ち、家族が再登録リンクを踏むまで着信を
+  // 受けられない。申請は best-effort で、失敗しても待受の動作には影響しない。
+  useEffect(() => {
+    void requestPersistentStorage();
+  }, []);
 
   // デバッグパネル: 通話中の「デバッグ」ボタンで開閉する。?debug=1 で初期表示ON（後方互換）。
   // 高齢者側の standby は静的エクスポートページなので location.search を直接見る。

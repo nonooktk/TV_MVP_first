@@ -31,10 +31,33 @@
  *  - 上げる: 本ファイルのキャッシュ戦略（対象パス・方式）を変えたとき。
  *  - 上げない: 日常のデプロイ。/_next/static/ はファイル名のハッシュが変わるため、
  *    据え置いても古いアセットが誤って再利用されることはない。
+ *
+ * T4 悲観レビュー（クロミ）指摘の反映（2026-08-04）:
+ *  - M-1: fetch() は HTTP エラーステータスでは reject しない。5xx をそのまま返すと
+ *    無人待受端末がオリジンのエラーページを表示したまま停止するため、明示的に判定する。
+ *  - M-2: 応答が返らない回線ではフォールバックにも到達しないため、AbortController で
+ *    10 秒のタイムアウトを設ける。
+ *  - M-3: /_next/static/ キャッシュの上限管理（古い順に削除）を入れる。
+ *    **この変更で CACHE_VERSION は上げない**。キャッシュ名を変えると、開きっぱなしの
+ *    待受端末が参照している旧チャンクを activate が全消去してしまい（m-5）、
+ *    SWA 上に旧ハッシュのファイルが無いぶん実害が出るため。対象パスも方式も変えず、
+ *    同じキャッシュに上限を足すだけの後方互換な変更である。
  */
 
 const CACHE_VERSION = "omohide-v1";
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
+
+// ナビゲーションのネットワーク待ちの上限（M-2）。Wi-Fi には繋がっているが応答が返らない
+// 状態（キャプティブポータル・回線の瀕死・オリジンのハング）は屋内据置端末で最も起きやすい
+// 劣化パターンで、fetch は例外を投げないため放置すると画面が空白のまま固まる。
+const NAVIGATION_TIMEOUT_MS = 10000;
+
+// /_next/static/ キャッシュに保持するエントリ数の上限（M-3）。
+// デプロイのたびに新しいハッシュのチャンクが積み増されるため、上限が無いと
+// オリジン単位の quota を食いつぶし、同じ quota を共有する localStorage
+// （device_token）が eviction で消えうる。1 デプロイあたり 20 本前後なので、
+// 200 件はおよそ 10 デプロイぶんの余裕にあたる。
+const MAX_STATIC_ENTRIES = 200;
 
 // インストール即時、新しい SW を有効化（待機させない）。precache は行わない。
 self.addEventListener("install", () => {
@@ -51,6 +74,14 @@ self.addEventListener("activate", (event) => {
           .filter((key) => key !== STATIC_CACHE)
           .map((key) => caches.delete(key)),
       );
+      // 既に上限を超えて肥大したキャッシュを持つ端末を、SW 更新の機会に掃除する（M-3）。
+      // 上限管理を入れる前に育ったキャッシュは put のたびの削除だけでは減らないため、
+      // ここでも一度均す。失敗しても activate は止めない。
+      try {
+        await trimStaticCache(await caches.open(STATIC_CACHE));
+      } catch {
+        // 掃除できなくても既存の動作には影響しない。
+      }
       await self.clients.claim();
     })(),
   );
@@ -91,7 +122,7 @@ self.addEventListener("fetch", (event) => {
 
   // 7. ハッシュ付き静的アセットのみ cache-first。
   if (path.startsWith("/_next/static/")) {
-    event.respondWith(cacheFirst(request));
+    event.respondWith(cacheFirst(request, event));
     return;
   }
 
@@ -107,24 +138,64 @@ self.addEventListener("fetch", (event) => {
 
 // cache-first: キャッシュヒットなら即返す。ミス時は取得し、200 のときだけ保存する
 // （opaque 応答〈status 0〉やエラー応答をキャッシュに混入させない）。
-async function cacheFirst(request) {
+//
+// 保存と上限管理は応答を待たせずに行う（画面表示を1ミリ秒も遅らせない）。ただし
+// event.waitUntil で SW の寿命に紐づけ、respondWith 後に処理が打ち切られないようにする。
+async function cacheFirst(request, event) {
   const cache = await caches.open(STATIC_CACHE);
   const cached = await cache.match(request);
   if (cached) return cached;
   const response = await fetch(request);
   if (response && response.status === 200) {
-    cache.put(request, response.clone());
+    const store = cache
+      .put(request, response.clone())
+      .then(() => trimStaticCache(cache))
+      // quota 超過（QuotaExceededError）はここで握りつぶす。キャッシュに入らなくても
+      // ネットワークから取得できているので画面は成立する（未処理の Promise 拒否も防ぐ）。
+      .catch(() => {});
+    if (event) event.waitUntil(store);
   }
   return response;
 }
 
+// /_next/static/ キャッシュのエントリ数を上限内に収める（M-3）。
+//
+// Cache Storage の keys() は**挿入順**を返すため、先頭ほど古い（＝古いデプロイの
+// チャンク）。開きっぱなしの端末が今まさに参照しているのは新しいチャンク側なので、
+// 古い順に落とすのが最も安全な削り方になる。
+async function trimStaticCache(cache) {
+  const keys = await cache.keys();
+  const overflow = keys.length - MAX_STATIC_ENTRIES;
+  if (overflow <= 0) return;
+  await Promise.all(keys.slice(0, overflow).map((key) => cache.delete(key)));
+}
+
 // network-first（ナビゲーション用）: 常にネットワーク優先。**成功応答は保存しない**。
 // 失敗時のみ、パスに応じたフォールバック HTML を返す。
+//
+// 「失敗」は3種類ある。いずれも無人待受端末を自動復帰させるためにフォールバックへ落とす。
+//  (a) ネットワーク例外（機内モード・電波断） … fetch が reject する。
+//  (b) オリジンの 5xx（SWA 障害・デプロイ中）  … fetch は **reject しない**ので status で判定する。
+//  (c) 応答が返らない（回線の瀕死・ハング）   … AbortController のタイムアウトで打ち切る。
+// フォールバック HTML の meta refresh が 30 秒ごとに再試行するため、回線やオリジンが
+// 戻れば人手を介さず待受へ復帰する。
+//
+// 4xx はフォールバックに落とさない。`/elder/register/?token=...` の 404 まで
+// 「つうしんが つながりません」にすると、原因の切り分けができなくなるため。
 async function networkFirstNavigation(request, path) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), NAVIGATION_TIMEOUT_MS);
   try {
-    return await fetch(request);
+    const response = await fetch(request, { signal: controller.signal });
+    if (response.status >= 500) return offlineFallback(path);
+    return response;
   } catch {
+    // ネットワーク例外、およびタイムアウトによる AbortError。
     return offlineFallback(path);
+  } finally {
+    // 応答ヘッダが確定した時点で必ず解除する。解除しないと、本文のストリーミング中に
+    // abort が走ってページが途中で切れる。
+    clearTimeout(timer);
   }
 }
 

@@ -15,6 +15,11 @@
 //  - **非対応・失敗はすべて握りつぶす**。request() は Secure Context でない・document が
 //    hidden・省電力モード等で NotAllowedError を投げうる。Wake Lock は「取れたら嬉しい」
 //    機能であって、取れないことで画面が壊れてはならない。
+//  - **失敗したら一定間隔で取り直す**（T4 悲観レビュー M-4）。再取得の契機が
+//    visibilitychange だけだと、可視のまま何日も放置される待受端末では「一度失敗したら
+//    終わり」になる。Android のバッテリーセーバーは Wake Lock の取得を拒否するが充電開始で
+//    解除されるため、その復帰を拾える契機が必要。常時給電の据置端末なので、60 秒間隔の
+//    素朴なリトライで足りる（取得できたら即座にタイマーを止める）。
 //
 // なお仕様上 **ユーザーアクティベーション（クリック等）は不要**なので、待受ページの
 // マウント直後に取得してよい（「でる」を押すまで待つ必要はない）。
@@ -53,6 +58,9 @@ export interface ScreenWakeLockEnv {
 
 /** 何もしない停止関数（非対応環境で返す）。 */
 const NOOP = () => {};
+
+/** 取得に失敗したあと、再取得を試みる間隔（ミリ秒）。 */
+export const WAKE_LOCK_RETRY_INTERVAL_MS = 60_000;
 
 function resolveNavigator(
   env?: ScreenWakeLockEnv
@@ -95,6 +103,27 @@ export function startScreenWakeLock(env?: ScreenWakeLockEnv): () => void {
   let sentinel: WakeLockSentinelLike | null = null;
   // request() の解決待ち中に visibilitychange が重なっても二重取得しないためのフラグ。
   let acquiring = false;
+  // 取得失敗後の再試行タイマー（保持できたら止める）。
+  let retryTimer: ReturnType<typeof setInterval> | null = null;
+
+  const clearRetry = () => {
+    if (retryTimer === null) return;
+    clearInterval(retryTimer);
+    retryTimer = null;
+  };
+
+  // 取得に失敗したときだけ動かす定期リトライ（M-4）。
+  // 待受端末は可視のまま放置されるため、visibilitychange に依存しない契機がここだけになる。
+  const scheduleRetry = () => {
+    if (stopped || retryTimer !== null) return;
+    retryTimer = setInterval(() => {
+      if (stopped || sentinel) {
+        clearRetry();
+        return;
+      }
+      void acquire();
+    }, WAKE_LOCK_RETRY_INTERVAL_MS);
+  };
 
   const releaseSentinel = (target: WakeLockSentinelLike) => {
     try {
@@ -127,13 +156,18 @@ export function startScreenWakeLock(env?: ScreenWakeLockEnv): () => void {
         return;
       }
       sentinel = acquired;
+      // 保持できたのでリトライは不要（UA が解放したら release イベントで参照が戻り、
+      // 次の契機〈可視復帰またはリトライ再開〉で取り直す）。
+      clearRetry();
       // UA 側の解放（hidden 遷移・省電力など）を検知して内部参照を戻す。
       // これが無いと、次に可視へ戻ったとき「保持中」と誤認して再取得できない。
       acquired.addEventListener("release", () => {
         if (sentinel === acquired) sentinel = null;
       });
     } catch {
-      // NotAllowedError 等。Wake Lock を諦めるだけで、待受の動作には影響させない。
+      // NotAllowedError 等。Wake Lock を諦めるだけで、待受の動作には影響させないが、
+      // 諦めっぱなしにはしない（省電力モード解除などで後から取れるようになるため）。
+      scheduleRetry();
     } finally {
       acquiring = false;
     }
@@ -151,6 +185,7 @@ export function startScreenWakeLock(env?: ScreenWakeLockEnv): () => void {
   return () => {
     if (stopped) return;
     stopped = true;
+    clearRetry();
     doc.removeEventListener("visibilitychange", onVisibilityChange);
     const held = sentinel;
     sentinel = null;
