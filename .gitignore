@@ -67,3 +67,9 @@ android-twa/.gradle/
 android-twa/*.apk
 android-twa/*.aab
 android-twa/*.keystore
+
+# 上記に加え、Bubblewrap が再生成する android-twa/ 直下の生成物
+# （build.gradle / settings.gradle / gradlew / gradle-wrapper / store_icon.png /
+#  manifest-checksum.txt 等）もすべて除外する。追跡するのは twa-manifest.json のみ。
+android-twa/*
+!android-twa/twa-manifest.json
