@@ -54,3 +54,30 @@ backend/cloud.env
 
 # Claude 用プロジェクトメモリ（ローカル専用・リポジトリ管理外）
 CLAUDE.md
+
+# TWA 署名キー（秘匿情報。絶対にコミットしない）
+*.keystore
+*.jks
+signing/
+
+# TWA ビルド成果物
+android-twa/app/
+android-twa/build/
+android-twa/.gradle/
+android-twa/*.apk
+android-twa/*.aab
+android-twa/*.keystore
+
+# 上記に加え、Bubblewrap が再生成する android-twa/ 直下の生成物
+# （build.gradle / settings.gradle / gradlew / gradle-wrapper / store_icon.png /
+#  manifest-checksum.txt 等）もすべて除外する。追跡するのは twa-manifest.json のみ。
+android-twa/*
+!android-twa/twa-manifest.json
+
+# 署名パスワード・鍵（拡張子/慣習名の網羅。T4 悲観レビュー m-1 対応）
+# リポジトリルートに置かれた場合も取りこぼさないため、パス指定なしで列挙する。
+keystore.properties
+local.properties
+*.p12
+*.pem
+play-service-account.json

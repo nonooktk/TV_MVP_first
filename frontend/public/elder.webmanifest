@@ -1,0 +1,19 @@
+{
+  "id": "/elder/standby/",
+  "lang": "ja",
+  "dir": "ltr",
+  "name": "おもひでてれび",
+  "short_name": "おもひでてれび",
+  "description": "おもひでてれび — まちうけ画面",
+  "start_url": "/elder/standby/",
+  "scope": "/elder/",
+  "display": "standalone",
+  "orientation": "landscape",
+  "theme_color": "#33302b",
+  "background_color": "#33302b",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

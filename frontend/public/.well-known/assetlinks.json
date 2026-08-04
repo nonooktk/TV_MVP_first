@@ -1,0 +1,22 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "jp.omohide.app",
+      "sha256_cert_fingerprints": [
+        "C4:65:58:0B:67:32:0E:ED:A3:86:54:C0:C1:EF:B3:84:26:58:E2:D7:09:4A:E3:6C:EF:AE:FC:1F:D0:B9:BC:BC"
+      ]
+    }
+  },
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "jp.omohide.family",
+      "sha256_cert_fingerprints": [
+        "C4:65:58:0B:67:32:0E:ED:A3:86:54:C0:C1:EF:B3:84:26:58:E2:D7:09:4A:E3:6C:EF:AE:FC:1F:D0:B9:BC:BC"
+      ]
+    }
+  }
+]
