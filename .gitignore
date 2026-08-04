@@ -73,3 +73,11 @@ android-twa/*.keystore
 #  manifest-checksum.txt 等）もすべて除外する。追跡するのは twa-manifest.json のみ。
 android-twa/*
 !android-twa/twa-manifest.json
+
+# 署名パスワード・鍵（拡張子/慣習名の網羅。T4 悲観レビュー m-1 対応）
+# リポジトリルートに置かれた場合も取りこぼさないため、パス指定なしで列挙する。
+keystore.properties
+local.properties
+*.p12
+*.pem
+play-service-account.json
