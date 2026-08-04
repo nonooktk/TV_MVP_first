@@ -405,11 +405,32 @@ h3 {
 
 /* 待受アルバム動画（data-testid は参照するだけで変更しない）。
    インライン style（position:fixed; inset:0; width/height:100%）を DOM 変更なしで
-   テレビ枠の内側へ収めるため、この 3 セレクタに限り !important を使う（仕様 §6-10）。 */
+   テレビ枠の内側へ収めるため、この 3 セレクタに限り !important を使う（仕様 §6-10）。
+
+   2026-08-04（T3-B1）修正: width/height の auto をやめて枠の内寸を明示する。
+   ── なぜ auto だと壊れたか（実測根拠）
+   video は置換要素のため、絶対配置で width/height:auto を指定すると used value が
+   **固有サイズ**（worker 生成動画は 1920x1080 固定・worker/stages/ffmpeg_render.py）になり、
+   4 辺 inset のうち right/bottom が over-constrained として無視される
+   （CSS 2.1 §10.3.8 / §10.6.5）。つまり箱はビューポートに関係なく常に 1920x1080 で、
+   画面が小さいほど右下がはみ出す。Playwright 実測（globals.css を読む実 DOM）:
+     892x412（Pixel 8 Pro 横向き）… 箱 1920x1080 / 枠 845.6x365.6 → 右 1074px・下 714px はみ出し
+     1366x768                    … 右 625px・下 383px はみ出し
+     1920x1080                   … 右 99.8px・下 99.8px はみ出し（PC で気づかれなかった理由）
+   枠の内寸（ビューポート − inset 2 辺 = 100% − 5.2vw）を明示すれば箱が枠と一致する。
+   % は position:fixed の包含ブロック＝ビューポートを基準に解決されるため inset:2.6vw と整合する
+   （100vw と違いスクロールバー幅の影響を受けない）。
+   ── なぜ object-fit を cover から contain に変えるか
+   枠の内寸は 16:9 とは限らず、横長端末ほど扁平になる。cover のままだと箱に合わせて
+   上下が削られ、**写真の顔が切れる**（892x412 の枠は 2.31:1 ＝ 16:9 動画の縦 23% がクロップ）。
+   高齢者向けサービスとして「顔が切れない」ことを最優先し、アスペクト維持の letterbox を許容する。
+   動画自体が ffmpeg の pad（黒）で 16:9 に整えられており、余白はインライン style の
+   background:#000 で描かれる＝画面面 --elder-screen(#12100d) とほぼ同色で目立たない。 */
 [data-testid="standby-album-video"] {
   inset: 2.6vw !important;
-  width: auto !important;
-  height: auto !important;
+  width: calc(100% - 5.2vw) !important;
+  height: calc(100% - 5.2vw) !important;
+  object-fit: contain !important;
   border-radius: 2.2vw !important;
 }
 
