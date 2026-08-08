@@ -14,6 +14,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """環境変数／.env から読み込むアプリ設定。"""
 
+    # 実行環境（"production" のとき Swagger/ReDoc/openapi.json を無効化する）。
+    # ローカル/テストは既定の "development" のままでよい。本番デプロイでのみ
+    # ENV=production を設定する。
+    ENV: str = "development"
+
     # DB 接続URL（同期 psycopg2 ドライバ）
     DATABASE_URL: str
 

@@ -40,7 +40,17 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="TV電話MVP API", version="0.2.0", lifespan=lifespan)
+# 本番（ENV=production）では Swagger UI / ReDoc / openapi.json を非公開にする
+# （API の機能一覧・データ形式が誰でも閲覧できてしまうため）。開発中はこれまでどおり表示する。
+_show_docs = get_settings().ENV != "production"
+app = FastAPI(
+    title="TV電話MVP API",
+    version="0.2.0",
+    lifespan=lifespan,
+    docs_url="/docs" if _show_docs else None,
+    redoc_url="/redoc" if _show_docs else None,
+    openapi_url="/openapi.json" if _show_docs else None,
+)
 
 
 def _cors_origins() -> list[str]:

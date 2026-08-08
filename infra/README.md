@@ -46,6 +46,12 @@ cloud.env には書かず、`ca-tvmvp-worker` のシークレット `openai-key`
 - `ca-tvmvp-api` の環境変数
   - `CORS_ALLOW_ORIGINS = http://localhost:3000,https://gray-dune-0117e4d00.7.azurestaticapps.net`
   - `FRONTEND_BASE_URL = https://gray-dune-0117e4d00.7.azurestaticapps.net`（登録リンク生成用）
+  - `ENV = production`（Swagger UI・ReDoc・openapi.json を非公開にする。未設定だと /docs 等が
+    誰でも閲覧できてしまうため必須。設定は次のコマンド）
+    ```
+    az containerapp update -n ca-tvmvp-api -g rg-001-gen12 \
+      --set-env-vars ENV=production
+    ```
 - Storage Blob の CORS 許可オリジン: `http://localhost:3000` ＋ SWA URL
   （ブラウザ直 Blob PUT のため。GET/PUT/OPTIONS/HEAD）
 - `ca-tvmvp-worker` の Azure OpenAI 環境変数
