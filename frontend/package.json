@@ -27,7 +27,7 @@
     "@types/react-dom": "19.2.3",
     "fake-indexeddb": "^6.0.0",
     "typescript": "6.0.3",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   },
   "//overrides": "推移的依存の既知脆弱性を最小限のオーバーライドで解消する。上流更新では消えないもののみ。",
   "overrides": {
