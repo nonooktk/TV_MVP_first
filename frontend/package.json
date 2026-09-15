@@ -11,20 +11,20 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
-    "@azure/msal-browser": "^5.17.1",
+    "@azure/msal-browser": "^5.21.0",
     "@mediapipe/tasks-vision": "^0.10.35",
-    "agora-rtc-sdk-ng": "^4.24.6",
+    "agora-rtc-sdk-ng": "^4.24.8",
     "idb": "^8.0.3",
     "microsoft-cognitiveservices-speech-sdk": "^1.51.0",
     "next": "^15.5.21",
-    "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.61.1",
-    "@types/node": "26.1.1",
-    "@types/react": "19.2.17",
-    "@types/react-dom": "19.2.3",
+    "@playwright/test": "^1.63.0",
+    "@types/node": "26.5.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
     "fake-indexeddb": "^6.0.0",
     "typescript": "6.0.3",
     "vitest": "^4.1.10"
