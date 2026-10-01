@@ -24,7 +24,7 @@ pydantic-settings==2.14.2
 
 # --- Entra ID（家族側ログイン本実装）JWT 検証 ---
 # v2.0 アクセストークンの署名検証（JWKS）。crypto エクストラで RS256（cryptography）を有効化。
-pyjwt[crypto]==2.13.0
+pyjwt[crypto]==2.15.0
 
 # --- Azure Storage（Blob/Queue。ローカルは Azurite で実動作）---
 azure-storage-blob==12.30.0
